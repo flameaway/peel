@@ -1,0 +1,9 @@
+Package: com.josh.stickers
+Name: Stickers
+Version: 1.6.0
+Architecture: iphoneos-arm64
+Description: Make your own stickers from photos (with background removal), use them from a Stickers section in the emoji keyboard, and peel-and-drag them onto message bubbles.
+Maintainer: josh
+Author: josh
+Section: Tweaks
+Depends: mobilesubstrate (>= 0.9.5000), firmware (>= 15.0), uikittools
