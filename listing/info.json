@@ -1,0 +1,13 @@
+{
+  "name": "Peel",
+  "tagline": "iOS 17-style stickers on iOS 16",
+  "description": "Lift the subject out of any photo, Live Photo, GIF or video, give it a die-cut outline, and use it from the emoji keyboard in every app. In Messages you can peel it off and stick it onto a bubble.\n\n- **One-tap background removal** with the same engine as Photos' \"Copy Subject\".\n- **Animated stickers** from Live Photos, GIFs and videos (30 fps HEICS, within Messages' 500 KB limit).\n- **Lives in the emoji keyboard.** Tap a sticker to insert it, or \"+\" to make a new one without leaving the app.\n- **Peel and stick.** In Messages, touch and hold a sticker to peel it off and drop it on any bubble.\n- **Fix the cut-out** with crop, an Erase & Restore brush, Lasso and Smart Lasso.\n- **iMessage app included**, with native peel-and-drag. There's no home screen app.\n\nAfter installing, open Messages and tap **Peel** in the app row, or switch any keyboard to emoji and tap the sticker icon at the bottom left.\n\nBackground removal needs an A12 chip or newer.",
+  "compatibility": "iOS 15 – 16 (rootless)",
+  "source": "https://github.com/flameaway/peel",
+  "tintColor": "#5C4CFF",
+  "header": "docs/images/hero.png",
+  "screenshots": [
+    {"file": "docs/images/showcase-light.png", "alt": "The Peel iMessage app in Messages, the Stickers section of the emoji keyboard, and the sticker maker"},
+    {"file": "docs/images/creator-flow.png", "alt": "The sticker maker: preview with outline toggle, crop, and the Erase & Restore brush"}
+  ]
+}

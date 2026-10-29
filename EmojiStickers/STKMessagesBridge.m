@@ -6,9 +6,19 @@
 + (instancetype)targetWithScreenCoordinate:(CGPoint)screenCoordinate initialSize:(CGSize)initialSize scale:(double)scale meshScaleFactor:(double)meshScaleFactor rotation:(double)rotation associatedLayoutIntent:(NSInteger)layoutIntent;
 @end
 
+@interface CKChatInputController : NSObject
+- (void)startEditingPayload:(id)payload;
+@end
+
 @interface CKChatController : UIViewController
 - (NSIndexPath *)selectedBalloonForTarget:(CKBrowserDragControllerTarget *)target;
 - (void)sendSticker:(id)sticker withDragTarget:(CKBrowserDragControllerTarget *)target;
+- (CKChatInputController *)inputController;
+@end
+
+// The payload Messages puts in the entry field for a sticker tapped in its drawer.
+@interface CKBrowserItemPayload : NSObject
++ (instancetype)browserItemFromSticker:(id)sticker;
 @end
 
 @interface IMSticker : NSObject
@@ -16,41 +26,11 @@
 - (void)setBallonBundleID:(NSString *)bundleID;
 @end
 
-@interface IMBalloonPluginManager : NSObject
-+ (instancetype)sharedInstance;
-- (id)allPlugins;
-@end
-
-@interface IMBalloonPlugin : NSObject
-- (NSString *)identifier;
-@end
-
-static NSString *const kStickersExtensionBundleID = @"com.josh.stickers.messages";
-// Apple's own user-made stickers. Used only if our iMessage app isn't registered.
-static NSString *const kFallbackPluginID = @"com.apple.messages.MSMessageExtensionBalloonPlugin:0000000000:com.apple.Stickers.UserGenerated.MessagesExtension";
-
-// Receiving devices only show stickers that are attributed to an iMessage app, identified by its balloon plugin ID
-// ("com.apple.messages.MSMessageExtensionBalloonPlugin:<team>:<bundle id>"), so send ours as coming from the
-// Stickers iMessage app bundled with the tweak.
-static NSString *STKStickerPluginID(void) {
-	static NSString *pluginID;
-	if (pluginID) {
-		return pluginID;
-	}
-	id plugins = [[NSClassFromString(@"IMBalloonPluginManager") sharedInstance] allPlugins];
-	if ([plugins isKindOfClass:NSDictionary.class]) {
-		plugins = [plugins allValues];
-	}
-	for (IMBalloonPlugin *plugin in plugins) {
-		NSString *identifier = [plugin respondsToSelector:@selector(identifier)] ? plugin.identifier : nil;
-		if ([identifier hasSuffix:[@":" stringByAppendingString:kStickersExtensionBundleID]]) {
-			pluginID = identifier;
-			break;
-		}
-	}
-	NSLog(@"[EmojiStickers] sticker plugin ID %@", pluginID ?: kFallbackPluginID);
-	return pluginID ?: kFallbackPluginID;
-}
+// Receiving devices only show stickers attributed to an iMessage app, identified by its balloon plugin ID
+// ("com.apple.messages.MSMessageExtensionBalloonPlugin:<team>:<bundle id>"). Send ours as Apple's own stickers made from
+// photos (iOS 17's Live Stickers): iOS 17 and later only offer "Save to Stickers" for stickers from that app
+// (+[CKUtilities isIMStickerSaveable:] checks for IMBalloonBundleIdentifierCling), and show them like their own.
+NSString *const STKStickerPluginID = @"com.apple.messages.MSMessageExtensionBalloonPlugin:0000000000:com.apple.Stickers.UserGenerated.MessagesExtension";
 
 static CKChatController *STKFindChatController(UIViewController *controller) {
 	Class chatClass = NSClassFromString(@"CKChatController");
@@ -118,6 +98,16 @@ static double STKScaleForSize(NSURL *url, CGSize size, UIScreen *screen) {
 	return chat && [chat respondsToSelector:@selector(sendSticker:withDragTarget:)] && [chat respondsToSelector:@selector(selectedBalloonForTarget:)] && NSClassFromString(@"IMSticker");
 }
 
+// An IMSticker for the file, attributed to our iMessage app.
++ (IMSticker *)stickerForURL:(NSURL *)url {
+	NSString *pluginID = STKStickerPluginID;
+	IMSticker *sticker = [[NSClassFromString(@"IMSticker") alloc] initWithStickerID:url.lastPathComponent stickerPackID:pluginID fileURL:url accessibilityLabel:@"Sticker" moodCategory:nil stickerName:nil];
+	if ([sticker respondsToSelector:@selector(setBallonBundleID:)]) {
+		[sticker setBallonBundleID:pluginID];
+	}
+	return sticker;
+}
+
 + (BOOL)canPlaceStickerAtScreenPoint:(CGPoint)point {
 	if (![self isAvailable]) {
 		return NO;
@@ -137,15 +127,28 @@ static double STKScaleForSize(NSURL *url, CGSize size, UIScreen *screen) {
 	if (!target || ![chat selectedBalloonForTarget:target]) {
 		return NO;
 	}
-	NSString *pluginID = STKStickerPluginID();
-	IMSticker *sticker = [[NSClassFromString(@"IMSticker") alloc] initWithStickerID:url.lastPathComponent stickerPackID:pluginID fileURL:url accessibilityLabel:@"Sticker" moodCategory:nil stickerName:nil];
+	IMSticker *sticker = [self stickerForURL:url];
 	if (!sticker) {
 		return NO;
 	}
-	if ([sticker respondsToSelector:@selector(setBallonBundleID:)]) {
-		[sticker setBallonBundleID:pluginID];
-	}
 	[chat sendSticker:sticker withDragTarget:target];
+	return YES;
+}
+
++ (BOOL)stageStickerAtURL:(NSURL *)url {
+	CKChatController *chat = STKVisibleChatController();
+	CKChatInputController *input = [chat respondsToSelector:@selector(inputController)] ? chat.inputController : nil;
+	Class payloadClass = NSClassFromString(@"CKBrowserItemPayload");
+	if (![input respondsToSelector:@selector(startEditingPayload:)] || ![payloadClass respondsToSelector:@selector(browserItemFromSticker:)] || !NSClassFromString(@"IMSticker")) {
+		return NO;
+	}
+	IMSticker *sticker = [self stickerForURL:url];
+	id payload = sticker ? [payloadClass browserItemFromSticker:sticker] : nil;
+	if (!payload) {
+		return NO;
+	}
+	// -[CKChatInputController _deferredCommitSticker:] does exactly this for a sticker tapped in the drawer.
+	[input startEditingPayload:payload];
 	return YES;
 }
 

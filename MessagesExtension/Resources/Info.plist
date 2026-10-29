@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>Stickers</string>
+	<string>Peel</string>
 	<key>CFBundleExecutable</key>
 	<string>StickersMessages</string>
 	<key>CFBundleIdentifier</key>
@@ -17,7 +17,7 @@
 	<key>CFBundlePackageType</key>
 	<string>XPC!</string>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>Stickers reads the video part of Live Photos you pick to make animated stickers.</string>
+	<string>Peel reads the video part of Live Photos you pick to make animated stickers.</string>
 	<key>CFBundleShortVersionString</key>
 	<string>1.0.0</string>
 	<key>CFBundleVersion</key>

@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import "STKStickerPanel.h"
+#import "STKMessagesBridge.h"
 
 // Adds a Stickers section to the system emoji keyboard (iOS 16, iPhone layout): a sticker button in front of
 // the category bar swaps the emoji grid for the sticker grid; tapping any emoji category swaps it back.
@@ -10,6 +11,12 @@
 
 @interface UIKeyboardEmojiCategoryBar : UIView
 @property (nonatomic, strong) UIView *scrubView;
+// From UIKBKeyView: the key in the keyboard layout and where its contents are drawn in the keyplane. The category
+// icons are spaced across the key's frame, while the selection circle and taps use the view's bounds.
+@property (nonatomic, readonly) id key;
+@property (nonatomic) CGRect drawFrame;
+- (void)resetRenderedKeyState;
+- (void)prepareForDisplay;
 @end
 
 @interface UIKeyboardEmojiCategoryBar_iPhone : UIKeyboardEmojiCategoryBar
@@ -137,17 +144,69 @@ static void STKLayoutButton(UIKeyboardEmojiCategoryBar *bar) {
 	button.frame = CGRectMake(frame.origin.x - kButtonWidth, frame.origin.y, kButtonWidth, frame.size.height);
 }
 
+@interface UIKBTree : NSObject
+@property (nonatomic) CGRect frame;
+// What the renderer spaces the category icons across (its width over the number of categories).
+@property (nonatomic) CGRect paddedFrame;
+@end
+
+// Narrows the bar's key in the layout to match the view, so the icons are drawn across the narrowed bar and line up
+// with the selection circle and taps (instead of the last category being pushed off the end). Returns whether
+// anything changed.
+static BOOL STKSyncKeyGeometry(UIKeyboardEmojiCategoryBar *bar) {
+	if (![bar respondsToSelector:@selector(key)] || ![bar respondsToSelector:@selector(setDrawFrame:)]) {
+		return NO;
+	}
+	UIKBTree *key = bar.key;
+	if (![key respondsToSelector:@selector(setFrame:)]) {
+		return NO;
+	}
+	BOOL changed = NO;
+	CGRect frame = bar.frame;
+	if (!CGRectEqualToRect(key.frame, frame)) {
+		if ([key respondsToSelector:@selector(paddedFrame)] && [key respondsToSelector:@selector(setPaddedFrame:)]) {
+			// Moves and narrows the padded frame as much as the frame.
+			CGRect old = key.frame, padded = key.paddedFrame;
+			CGFloat left = CGRectGetMinX(frame) - CGRectGetMinX(old), right = CGRectGetMaxX(frame) - CGRectGetMaxX(old);
+			key.paddedFrame = CGRectMake(padded.origin.x + left, padded.origin.y, padded.size.width - left + right, padded.size.height);
+		}
+		key.frame = frame;
+		// The keyplane may hand the same key to a new bar view; this keeps that from being narrowed twice.
+		objc_setAssociatedObject(key, kAdjustedFrameKey, [NSValue valueWithCGRect:frame], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		changed = YES;
+	}
+	if (!CGRectEqualToRect(bar.drawFrame, frame)) {
+		bar.drawFrame = frame;
+		changed = YES;
+	}
+	return changed;
+}
+
 %hook UIKeyboardEmojiCategoryBar_iPhone
+
+- (void)prepareForDisplay {
+	if (objc_getAssociatedObject(self, kAdjustedFrameKey)) {
+		STKSyncKeyGeometry(self);
+	}
+	%orig;
+}
 
 // Make room for the sticker button in front of the category icons.
 - (void)setFrame:(CGRect)frame {
 	NSValue *adjusted = objc_getAssociatedObject(self, kAdjustedFrameKey);
+	if (!adjusted && [self respondsToSelector:@selector(key)]) {
+		adjusted = objc_getAssociatedObject(self.key, kAdjustedFrameKey);
+	}
 	if (!(adjusted && CGRectEqualToRect(adjusted.CGRectValue, frame)) && frame.size.width > kButtonWidth * 4) {
 		frame.origin.x += kButtonWidth;
 		frame.size.width -= kButtonWidth;
 		objc_setAssociatedObject(self, kAdjustedFrameKey, [NSValue valueWithCGRect:frame], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 	}
 	%orig(frame);
+	if (objc_getAssociatedObject(self, kAdjustedFrameKey) && STKSyncKeyGeometry(self) && [self respondsToSelector:@selector(resetRenderedKeyState)]) {
+		[self resetRenderedKeyState];
+		[self prepareForDisplay];
+	}
 	STKLayoutButton(self);
 }
 
@@ -199,3 +258,35 @@ static void STKLayoutButton(UIKeyboardEmojiCategoryBar *bar) {
 }
 
 %end
+
+// Stickers sent from our iMessage app's drawer are attributed to it by Messages itself. Attribute them like the ones
+// sent from the keyboard instead, so they can be saved on iOS 17 and later.
+@interface IMSticker : NSObject
+@end
+
+static NSString *STKAttributedPluginID(NSString *pluginID) {
+	return [pluginID hasSuffix:@":com.josh.stickers.messages"] ? STKStickerPluginID : pluginID;
+}
+
+%group Messages
+
+%hook IMSticker
+
+- (NSString *)stickerPackGUID {
+	return STKAttributedPluginID(%orig);
+}
+
+- (NSString *)ballonBundleID {
+	return STKAttributedPluginID(%orig);
+}
+
+%end
+
+%end
+
+%ctor {
+	%init;
+	if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.MobileSMS"] && objc_getClass("IMSticker")) {
+		%init(Messages);
+	}
+}

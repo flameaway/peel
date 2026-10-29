@@ -22,7 +22,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/showcase-dark.png">
-  <img src="docs/images/showcase-light.png" alt="The Stickers iMessage app in Messages, the Stickers section of the emoji keyboard, and the sticker maker">
+  <img src="docs/images/showcase-light.png" alt="The Peel iMessage app in Messages, the Stickers section of the emoji keyboard, and the sticker maker">
 </picture>
 
 ## Features
@@ -65,8 +65,8 @@ The same maker is shared by the iMessage app and the keyboard, so both ways in w
 </p>
 
 1. On your device, open **[flameaway.github.io/repo](https://flameaway.github.io/repo/)** and tap **Add to Sileo** or **Add to Zebra** (or add `https://flameaway.github.io/repo/` under Sources). You'll get updates automatically from then on.
-2. Search for **Stickers** and install it, then respring.
-3. In Messages, open **Stickers** in the app row and tap "+" to make your first sticker, or open any keyboard, switch to emoji, and tap the sticker icon at the bottom left.
+2. Search for **Peel** and install it, then respring.
+3. In Messages, open **Peel** in the app row and tap "+" to make your first sticker, or open any keyboard, switch to emoji, and tap the sticker icon at the bottom left.
 
 You can also download the `.deb` from [Releases](../../releases) and install it with `dpkg -i`.
 
@@ -94,6 +94,8 @@ make do FINALPACKAGE=1 THEOS_DEVICE_IP=<ip> THEOS_DEVICE_USER=root  # build, ins
 ```
 
 `make install` on its own reinstalls the last built package without rebuilding.
+
+To publish, bump `Version` in `control`, commit, and run `make release NOTES="- What changed"`. That builds the final package and creates a GitHub release with it. [Flame's repo](https://github.com/flameaway/repo) picks up new releases within the hour, along with the store listing in `listing/`: `info.json` (description, screenshots and header, as paths in this repo) and `icon.png`.
 
 ## How it works
 

@@ -4,6 +4,7 @@
 #import "STKStore.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <dlfcn.h>
+#import <objc/runtime.h>
 
 #ifndef THEOS_PACKAGE_INSTALL_PREFIX
 #define THEOS_PACKAGE_INSTALL_PREFIX ""
@@ -114,9 +115,202 @@ static BOOL STKPasteItems(NSArray<NSDictionary<NSString *, id> *> *items) {
 	return NO;
 }
 
-// Inserts a sticker as an image, converting HEICS stickers to GIF off the main thread first. Calls back on the main
-// queue with whether anything took it.
+// A drop of the sticker that never came from a drag, for handing it to an app's drop target.
+@interface STKDropSession : NSObject <UIDropSession>
+- (instancetype)initWithItemProvider:(NSItemProvider *)provider location:(CGPoint)location inView:(UIView *)view;
+@end
+
+@implementation STKDropSession {
+	NSArray<UIDragItem *> *_items;
+	CGPoint _location;
+	__weak UIView *_view;
+}
+
+- (instancetype)initWithItemProvider:(NSItemProvider *)provider location:(CGPoint)location inView:(UIView *)view {
+	if ((self = [super init])) {
+		_items = @[[[UIDragItem alloc] initWithItemProvider:provider]];
+		_location = location;
+		_view = view;
+	}
+	return self;
+}
+
+- (NSArray<UIDragItem *> *)items {
+	return _items;
+}
+
+- (CGPoint)locationInView:(UIView *)view {
+	UIView *source = _view;
+	return source && view ? [view convertPoint:_location fromView:source] : _location;
+}
+
+- (BOOL)allowsMoveOperation {
+	return NO;
+}
+
+- (BOOL)isRestrictedToDraggingApplication {
+	return NO;
+}
+
+- (BOOL)hasItemsConformingToTypeIdentifiers:(NSArray<NSString *> *)typeIdentifiers {
+	NSLog(@"[EmojiStickers] drop session asked for types %@", typeIdentifiers);
+	for (UIDragItem *item in _items) {
+		if ([item.itemProvider hasItemConformingToTypeIdentifier:typeIdentifiers.firstObject] || [[item.itemProvider.registeredTypeIdentifiers filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *type, NSDictionary *bindings) {
+			for (NSString *wanted in typeIdentifiers) {
+				if ([[UTType typeWithIdentifier:type] conformsToType:[UTType typeWithIdentifier:wanted] ?: UTTypeData]) {
+					return YES;
+				}
+			}
+			return NO;
+		}]] count]) {
+			return YES;
+		}
+	}
+	return NO;
+}
+
+- (BOOL)canLoadObjectsOfClass:(Class<NSItemProviderReading>)aClass {
+	NSLog(@"[EmojiStickers] drop session asked if it can load %@", aClass);
+	for (UIDragItem *item in _items) {
+		if ([item.itemProvider canLoadObjectOfClass:aClass]) {
+			return YES;
+		}
+	}
+	return NO;
+}
+
+- (id<UIDragSession>)localDragSession {
+	return nil;
+}
+
+- (UIDropSessionProgressIndicatorStyle)progressIndicatorStyle {
+	return UIDropSessionProgressIndicatorStyleNone;
+}
+
+- (void)setProgressIndicatorStyle:(UIDropSessionProgressIndicatorStyle)style {
+}
+
+- (NSProgress *)progress {
+	return [NSProgress discreteProgressWithTotalUnitCount:1];
+}
+
+- (NSProgress *)loadObjectsOfClass:(Class<NSItemProviderReading>)aClass completion:(void (^)(NSArray<__kindof id<NSItemProviderReading>> *objects))completion {
+	NSLog(@"[EmojiStickers] drop session loading %@", aClass);
+	NSProgress *progress = [NSProgress discreteProgressWithTotalUnitCount:_items.count];
+	NSMutableArray *objects = [NSMutableArray array];
+	dispatch_group_t group = dispatch_group_create();
+	for (UIDragItem *item in _items) {
+		if (![item.itemProvider canLoadObjectOfClass:aClass]) {
+			continue;
+		}
+		dispatch_group_enter(group);
+		[item.itemProvider loadObjectOfClass:aClass completionHandler:^(id<NSItemProviderReading> object, NSError *error) {
+			@synchronized (objects) {
+				if (object) {
+					[objects addObject:object];
+				}
+			}
+			progress.completedUnitCount++;
+			dispatch_group_leave(group);
+		}];
+	}
+	// UIKit calls back on the main queue.
+	dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+		completion(objects);
+	});
+	return progress;
+}
+
+@end
+
+// Whether the object's class is the app's own code rather than a system framework's.
+static BOOL STKIsAppClass(id object) {
+	const char *image = object ? class_getImageName(object_getClass(object)) : NULL;
+	return image && strstr(image, "/containers/Bundle/Application/");
+}
+
+// Apps that take images dropped on a conversation but not pasted: Instagram's paste hands images to a handler its
+// DMs don't set up, while its drop target sends them.
+static BOOL STKPrefersDrop(void) {
+	return [NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.burbn.instagram"];
+}
+
+// Drops the sticker on the nearest drop target of the app's own around the text field being typed in, as if it was
+// dragged there. Returns NO if there's none that takes it.
+static BOOL STKDropItems(NSArray<NSDictionary<NSString *, id> *> *items) {
+	Class keyboardClass = NSClassFromString(@"UIKeyboardImpl");
+	id field = [keyboardClass respondsToSelector:@selector(activeInstance)] ? [[keyboardClass activeInstance] delegate] : nil;
+	if (![field isKindOfClass:UIView.class]) {
+		return NO;
+	}
+	NSString *typeIdentifier = items.firstObject.allKeys.firstObject;
+	NSData *data = items.firstObject[typeIdentifier];
+	if (!data) {
+		return NO;
+	}
+	for (UIView *view = field; view; view = view.superview) {
+		for (id<UIInteraction> interaction in view.interactions) {
+			if ([interaction isKindOfClass:UIDropInteraction.class]) {
+				NSLog(@"[EmojiStickers] (all) drop target %@ on %@", [(UIDropInteraction *)interaction delegate].class, view.class);
+			}
+		}
+	}
+	for (UIView *view = field; view; view = view.superview) {
+		for (id<UIInteraction> interaction in view.interactions) {
+			if (![interaction isKindOfClass:UIDropInteraction.class]) {
+				continue;
+			}
+			UIDropInteraction *drop = (UIDropInteraction *)interaction;
+			id<UIDropInteractionDelegate> delegate = drop.delegate;
+			NSLog(@"[EmojiStickers] drop target %@ on %@ (app's own %d)", [delegate class], view.class, STKIsAppClass(delegate));
+			if (!STKIsAppClass(delegate) || ![delegate respondsToSelector:@selector(dropInteraction:performDrop:)]) {
+				continue;
+			}
+			NSItemProvider *provider = [[NSItemProvider alloc] initWithItem:data typeIdentifier:typeIdentifier];
+			CGPoint center = CGPointMake(CGRectGetMidX(view.bounds), CGRectGetMidY(view.bounds));
+			STKDropSession *session = [[STKDropSession alloc] initWithItemProvider:provider location:center inView:view];
+			if ([delegate respondsToSelector:@selector(dropInteraction:canHandleSession:)] && ![delegate dropInteraction:drop canHandleSession:session]) {
+				NSLog(@"[EmojiStickers] %@ %@: %@ on %@ won't take the drop", NSBundle.mainBundle.bundleIdentifier, typeIdentifier, delegate.class, view.class);
+				continue;
+			}
+			if ([delegate respondsToSelector:@selector(dropInteraction:sessionDidEnter:)]) {
+				[delegate dropInteraction:drop sessionDidEnter:session];
+			}
+			UIDropOperation operation = UIDropOperationCopy;
+			if ([delegate respondsToSelector:@selector(dropInteraction:sessionDidUpdate:)]) {
+				operation = [delegate dropInteraction:drop sessionDidUpdate:session].operation;
+			}
+			if (operation != UIDropOperationCopy && operation != UIDropOperationMove) {
+				if ([delegate respondsToSelector:@selector(dropInteraction:sessionDidExit:)]) {
+					[delegate dropInteraction:drop sessionDidExit:session];
+				}
+				NSLog(@"[EmojiStickers] %@ %@: %@ on %@ proposed operation %lu", NSBundle.mainBundle.bundleIdentifier, typeIdentifier, delegate.class, view.class, (unsigned long)operation);
+				continue;
+			}
+			NSLog(@"[EmojiStickers] %@ %@: dropping on %@ of %@", NSBundle.mainBundle.bundleIdentifier, typeIdentifier, delegate.class, view.class);
+			[delegate dropInteraction:drop performDrop:session];
+			if ([delegate respondsToSelector:@selector(dropInteraction:concludeDrop:)]) {
+				[delegate dropInteraction:drop concludeDrop:session];
+			}
+			if ([delegate respondsToSelector:@selector(dropInteraction:sessionDidEnd:)]) {
+				[delegate dropInteraction:drop sessionDidEnd:session];
+			}
+			return YES;
+		}
+	}
+	NSLog(@"[EmojiStickers] %@ %@: no drop target of the app's around %@", NSBundle.mainBundle.bundleIdentifier, typeIdentifier, [field class]);
+	return NO;
+}
+
+// Inserts a sticker: in Messages as a real sticker in the message being written, elsewhere as an image, converting
+// HEICS stickers to GIF off the main thread first. Calls back on the main queue with whether anything took it.
 static void STKInsertSticker(NSURL *url, void (^completion)(BOOL inserted)) {
+	if ([STKMessagesBridge stageStickerAtURL:url]) {
+		dispatch_async(dispatch_get_main_queue(), ^{
+			completion(YES);
+		});
+		return;
+	}
 	BOOL telegram = [NSBundle.mainBundle.bundleIdentifier isEqualToString:@"ph.telegra.Telegraph"];
 	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
 		NSArray<NSDictionary<NSString *, id> *> *items = nil;
@@ -129,27 +323,129 @@ static void STKInsertSticker(NSURL *url, void (^completion)(BOOL inserted)) {
 			items = data && type ? @[@{type: data}] : nil;
 		}
 		dispatch_async(dispatch_get_main_queue(), ^{
-			completion(items && STKPasteItems(items));
+			completion(items && ((STKPrefersDrop() && STKDropItems(items)) || STKPasteItems(items)));
 		});
 	});
+}
+
+// Messages' own sticker drag view (ChatKit, iOS 16): the peel, shine and elastic follow its sticker drawer uses.
+@interface CKBrowserDragStickerView : UIView
+- (instancetype)initWithSourceRect:(CGRect)sourceRect dragImage:(id)dragImage;
+- (void)setCanPeel:(BOOL)canPeel;
+- (void)setPressed:(BOOL)pressed;
+- (void)animatePeelWithCompletion:(void (^)(void))completion;
+- (void)setInitialDragStartPosition:(CGPoint)position;
+- (void)attachElasticEffectsForLocation:(CGPoint)location;
+- (void)updateElasticEffectsForLocation:(CGPoint)location;
+- (void)detachElasticEffects;
+- (void)updateAnimationTimerObserving;
+- (CGPoint)dragViewCenter;
+- (CGSize)initialSize;
+// The view is drawn at initialSize times both of these.
+- (double)initialScale;
+- (double)dragViewScale;
+- (void)reversePeelAnimationToPoint:(CGPoint)point forPlacement:(BOOL)placement shouldShrink:(BOOL)shrink completionBlock:(void (^)(void))completion;
+@end
+
+// Frames and durations, which is what the drag view takes as its image.
+@interface CKAnimatedImage : NSObject
+- (instancetype)initWithImages:(NSArray<UIImage *> *)images durations:(NSArray<NSNumber *> *)durations;
+@end
+
+// Where an image of the given size shows in bounds with aspect-fit, so the peel starts exactly over the thumbnail.
+static CGRect STKAspectFitRect(CGSize size, CGRect bounds) {
+	if (size.width <= 0 || size.height <= 0) {
+		return bounds;
+	}
+	CGFloat factor = MIN(bounds.size.width / size.width, bounds.size.height / size.height);
+	CGSize fitted = CGSizeMake(size.width * factor, size.height * factor);
+	return CGRectMake(CGRectGetMidX(bounds) - fitted.width / 2, CGRectGetMidY(bounds) - fitted.height / 2, fitted.width, fitted.height);
+}
+
+static BOOL STKNativePeelAvailable(void) {
+	Class viewClass = NSClassFromString(@"CKBrowserDragStickerView");
+	SEL selectors[] = {@selector(initWithSourceRect:dragImage:), @selector(setCanPeel:), @selector(setPressed:), @selector(animatePeelWithCompletion:),
+		@selector(setInitialDragStartPosition:), @selector(attachElasticEffectsForLocation:), @selector(updateElasticEffectsForLocation:),
+		@selector(detachElasticEffects), @selector(updateAnimationTimerObserving), @selector(dragViewCenter), @selector(initialSize),
+		@selector(reversePeelAnimationToPoint:forPlacement:shouldShrink:completionBlock:)};
+	for (size_t i = 0; viewClass && i < sizeof(selectors) / sizeof(*selectors); i++) {
+		if (![viewClass instancesRespondToSelector:selectors[i]]) {
+			return NO;
+		}
+	}
+	return viewClass && [NSClassFromString(@"CKAnimatedImage") instancesRespondToSelector:@selector(initWithImages:durations:)];
+}
+
+// The sticker's silhouette as a template image: a line around its edge over a faint fill, like the spot a sticker
+// leaves on its sheet once peeled off.
+static UIImage *STKStickerOutline(UIImage *image, CGSize size) {
+	image = image.images.firstObject ?: image;
+	if (!image || size.width <= 0 || size.height <= 0) {
+		return nil;
+	}
+	CGRect fit = STKAspectFitRect(image.size, CGRectMake(0, 0, size.width, size.height));
+	CGFloat line = 2;
+	UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:size];
+	UIImage *outline = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+		// The silhouette spread outward by the line width...
+		for (int i = 0; i < 16; i++) {
+			CGFloat angle = i * M_PI / 8;
+			[image drawInRect:CGRectOffset(fit, cos(angle) * line, sin(angle) * line)];
+		}
+		[UIColor.blackColor setFill];
+		UIRectFillUsingBlendMode(context.format.bounds, kCGBlendModeSourceIn);
+		// ...mostly cut away by the silhouette itself, leaving the line and a faint fill inside it.
+		[image drawInRect:fit blendMode:kCGBlendModeDestinationOut alpha:0.88];
+	}];
+	return [outline imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
 }
 
 @interface STKPanelCell : UICollectionViewCell
 @property (nonatomic, readonly) UIImageView *imageView;
 // The sticker shown, so a thumbnail that finishes loading late lands in the right cell.
 @property (nonatomic, copy) NSURL *url;
+// While its sticker is being dragged, the cell shows only the sticker's outline.
+@property (nonatomic, getter=isPeeled) BOOL peeled;
 @end
 
-@implementation STKPanelCell
+@implementation STKPanelCell {
+	UIImageView *_outlineView;
+}
 
 - (instancetype)initWithFrame:(CGRect)frame {
 	if ((self = [super initWithFrame:frame])) {
+		_outlineView = [[UIImageView alloc] initWithFrame:CGRectInset(self.contentView.bounds, 4, 4)];
+		_outlineView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+		_outlineView.tintColor = UIColor.tertiaryLabelColor;
+		_outlineView.alpha = 0;
+		[self.contentView addSubview:_outlineView];
 		_imageView = [[UIImageView alloc] initWithFrame:CGRectInset(self.contentView.bounds, 4, 4)];
 		_imageView.contentMode = UIViewContentModeScaleAspectFit;
 		_imageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 		[self.contentView addSubview:_imageView];
 	}
 	return self;
+}
+
+- (void)prepareForReuse {
+	[super prepareForReuse];
+	self.peeled = NO;
+}
+
+- (void)setPeeled:(BOOL)peeled {
+	_peeled = peeled;
+	[_outlineView.layer removeAllAnimations];
+	self.imageView.alpha = peeled ? 0 : 1;
+	if (!peeled) {
+		_outlineView.alpha = 0;
+		_outlineView.image = nil;
+		return;
+	}
+	_outlineView.image = STKStickerOutline(self.imageView.image, self.imageView.bounds.size);
+	// Shows up as the sticker comes away.
+	[UIView animateWithDuration:0.2 delay:0.05 options:0 animations:^{
+		self->_outlineView.alpha = 1;
+	} completion:nil];
 }
 
 - (void)setHighlighted:(BOOL)highlighted {
@@ -254,7 +550,10 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 	// Drag state.
 	NSURL *_dragURL;
 	UIImageView *_dragView;
-	UIView *_dragSourceView;
+	// In Messages: its native peeling sticker, in a container covering the window.
+	CKBrowserDragStickerView *_peelView;
+	UIView *_peelContainer;
+	STKPanelCell *_dragSourceCell;
 	CGPoint _dragTouchOffset;
 	BOOL _dragOverBubble;
 }
@@ -313,15 +612,11 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 	[_collectionView reloadData];
 }
 
-- (void)openApp {
-	[UIApplication.sharedApplication openURL:[NSURL URLWithString:@"josh-stickers://new"] options:@{} completionHandler:nil];
-}
-
 - (void)presentCreator {
 	STKPresentCreatorFunction present = STKCreatorEntryPoint();
 	UIViewController *presenter = STKTopViewController();
 	if (!present || !presenter) {
-		[self openApp];
+		[self showToast:@"The sticker maker couldn't open here. Make one from Peel in the Messages app row."];
 		return;
 	}
 	present(presenter, ^(BOOL saved) {
@@ -481,8 +776,13 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 - (void)beginDragFromCell:(STKPanelCell *)cell url:(NSURL *)url touch:(CGPoint)touch {
 	UIWindow *window = self.window;
 	_dragURL = url;
-	_dragSourceView = cell.imageView;
+	_dragSourceCell = cell;
 	_dragOverBubble = NO;
+	// Lift the sticker above the finger so it isn't hidden underneath it.
+	_dragTouchOffset = CGPointMake(0, -kDragStickerSide * 0.45);
+	if ([STKMessagesBridge isAvailable] && STKNativePeelAvailable() && [self beginNativePeelFromCell:cell touch:touch]) {
+		return;
+	}
 
 	CGRect start = [cell.imageView convertRect:cell.imageView.bounds toView:window];
 	// Peel off the thumbnail already on screen right away; loading a larger copy can take a while.
@@ -509,11 +809,9 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 	_dragView.layer.shadowOffset = CGSizeMake(0, 6);
 	_dragView.userInteractionEnabled = NO;
 	[window addSubview:_dragView];
-	cell.imageView.alpha = 0;
+	cell.peeled = YES;
 
-	// Lift the sticker above the finger so it isn't hidden underneath it.
-	CGPoint lifted = CGPointMake(touch.x, touch.y - kDragStickerSide * 0.45);
-	_dragTouchOffset = CGPointMake(lifted.x - touch.x, lifted.y - touch.y);
+	CGPoint lifted = CGPointMake(touch.x + _dragTouchOffset.x, touch.y + _dragTouchOffset.y);
 	[[UIImpactFeedbackGenerator.alloc initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
 	[UIView animateWithDuration:0.28 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
 		self->_dragView.center = lifted;
@@ -527,12 +825,68 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 	[_dragView.layer addAnimation:shadow forKey:@"lift"];
 }
 
+// Peels the sticker off the grid the way Messages' sticker drawer does. NO if the drag view couldn't be made.
+- (BOOL)beginNativePeelFromCell:(STKPanelCell *)cell touch:(CGPoint)touch {
+	UIWindow *window = self.window;
+	UIImage *image = cell.imageView.image;
+	NSArray<UIImage *> *thumbnails = image.images.count > 1 ? image.images : (image ? @[image] : nil);
+	if (!thumbnails) {
+		return NO;
+	}
+	// The drag view shows its image at the image's point size, so redraw the frames at the size to drag.
+	CGSize side = STKAspectFitRect(image.size, CGRectMake(0, 0, kDragStickerSide, kDragStickerSide)).size;
+	UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:side format:[UIGraphicsImageRendererFormat formatForTraitCollection:self.traitCollection]];
+	NSMutableArray<UIImage *> *frames = [NSMutableArray arrayWithCapacity:thumbnails.count];
+	for (UIImage *thumbnail in thumbnails) {
+		[frames addObject:[renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+			[thumbnail drawInRect:CGRectMake(0, 0, side.width, side.height)];
+		}]];
+	}
+	NSNumber *duration = @(image.images.count > 1 ? image.duration / image.images.count : 0.1);
+	NSMutableArray<NSNumber *> *durations = [NSMutableArray arrayWithCapacity:frames.count];
+	for (NSUInteger i = 0; i < frames.count; i++) {
+		[durations addObject:duration];
+	}
+	CKAnimatedImage *dragImage = [[NSClassFromString(@"CKAnimatedImage") alloc] initWithImages:frames durations:durations];
+	CGRect start = [cell.imageView convertRect:STKAspectFitRect(image.size, cell.imageView.bounds) toView:window];
+	CKBrowserDragStickerView *peelView = dragImage ? [[NSClassFromString(@"CKBrowserDragStickerView") alloc] initWithSourceRect:start dragImage:dragImage] : nil;
+	if (!peelView) {
+		return NO;
+	}
+	_peelContainer = [[UIView alloc] initWithFrame:window.bounds];
+	_peelContainer.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+	_peelContainer.userInteractionEnabled = NO;
+	[window addSubview:_peelContainer];
+	_peelView = peelView;
+	[peelView setCanPeel:YES];
+	[peelView setPressed:YES];
+	[_peelContainer addSubview:peelView];
+	cell.peeled = YES;
+
+	CGPoint lifted = CGPointMake(touch.x + _dragTouchOffset.x, touch.y + _dragTouchOffset.y);
+	[[UIImpactFeedbackGenerator.alloc initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+	[peelView animatePeelWithCompletion:nil];
+	[peelView setInitialDragStartPosition:lifted];
+	[peelView attachElasticEffectsForLocation:lifted];
+	[peelView updateAnimationTimerObserving];
+	return YES;
+}
+
 - (CGPoint)screenPointForWindowPoint:(CGPoint)point {
 	UIWindow *window = self.window;
 	return [window convertPoint:point toCoordinateSpace:window.screen.coordinateSpace];
 }
 
 - (void)moveDragTo:(CGPoint)touch {
+	if (_peelView) {
+		[_peelView updateElasticEffectsForLocation:CGPointMake(touch.x + _dragTouchOffset.x, touch.y + _dragTouchOffset.y)];
+		BOOL overBubble = [STKMessagesBridge canPlaceStickerAtScreenPoint:[self screenPointForWindowPoint:[_peelView dragViewCenter]]];
+		if (overBubble && !_dragOverBubble) {
+			[[UISelectionFeedbackGenerator new] selectionChanged];
+		}
+		_dragOverBubble = overBubble;
+		return;
+	}
 	if (!_dragView) {
 		return;
 	}
@@ -550,7 +904,49 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 	}
 }
 
+- (void)endNativePeelAt:(CGPoint)touch cancelled:(BOOL)cancelled {
+	CKBrowserDragStickerView *peelView = _peelView;
+	UIView *container = _peelContainer;
+	_peelView = nil;
+	_peelContainer = nil;
+	[peelView detachElasticEffects];
+	CGPoint center = [peelView dragViewCenter];
+	BOOL overKeyboard = CGRectContainsPoint([[self keyboardHostView] convertRect:[self keyboardHostView].bounds toView:self.window], center);
+	// Stick it down at the size it was shown while dragging.
+	CGSize size = [peelView initialSize];
+	if ([peelView respondsToSelector:@selector(initialScale)] && [peelView respondsToSelector:@selector(dragViewScale)]) {
+		CGFloat scale = [peelView initialScale] * [peelView dragViewScale];
+		size = CGSizeMake(size.width * scale, size.height * scale);
+	}
+	BOOL placed = !cancelled && !overKeyboard && [STKMessagesBridge placeStickerAtURL:_dragURL screenPoint:[self screenPointForWindowPoint:center] size:size rotation:0];
+	STKPanelCell *source = _dragSourceCell;
+	if (placed) {
+		[[UIImpactFeedbackGenerator.alloc initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
+		source.peeled = NO;
+	}
+	// Sticks it down where it was dropped, or settles it back into the grid.
+	UIView *sourceImage = source.imageView;
+	CGPoint home = source.window ? [sourceImage convertPoint:CGPointMake(CGRectGetMidX(sourceImage.bounds), CGRectGetMidY(sourceImage.bounds)) toView:container] : center;
+	[peelView reversePeelAnimationToPoint:placed ? center : home forPlacement:placed shouldShrink:NO completionBlock:^{
+		source.peeled = NO;
+		[container removeFromSuperview];
+	}];
+}
+
+// The view holding the whole keyboard; dropping back onto it always cancels.
+- (UIView *)keyboardHostView {
+	UIView *keyboard = self;
+	while (keyboard.superview && ![NSStringFromClass(keyboard.class) isEqualToString:@"UIInputSetHostView"]) {
+		keyboard = keyboard.superview;
+	}
+	return keyboard;
+}
+
 - (void)endDragAt:(CGPoint)touch cancelled:(BOOL)cancelled {
+	if (_peelView) {
+		[self endNativePeelAt:touch cancelled:cancelled];
+		return;
+	}
 	UIImageView *dragView = _dragView;
 	if (!dragView) {
 		return;
@@ -558,11 +954,7 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 	_dragView = nil;
 	CGPoint center = dragView.center;
 	CGPoint screenPoint = [self screenPointForWindowPoint:center];
-	// Dropping back onto the keyboard always cancels.
-	UIView *keyboard = self;
-	while (keyboard.superview && ![NSStringFromClass(keyboard.class) isEqualToString:@"UIInputSetHostView"]) {
-		keyboard = keyboard.superview;
-	}
+	UIView *keyboard = [self keyboardHostView];
 	BOOL overKeyboard = CGRectContainsPoint([keyboard convertRect:keyboard.bounds toView:self.window], center);
 
 	BOOL placed = NO;
@@ -579,10 +971,10 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 		}
 	}
 
-	UIView *source = _dragSourceView;
+	STKPanelCell *source = _dragSourceCell;
 	if (placed) {
 		[[UIImpactFeedbackGenerator.alloc initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
-		source.alpha = 1;
+		source.peeled = NO;
 		[UIView animateWithDuration:0.2 animations:^{
 			dragView.transform = CGAffineTransformMakeScale(0.9, 0.9);
 			dragView.alpha = 0;
@@ -592,7 +984,7 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 		return;
 	}
 	// Fly back into the grid.
-	CGRect home = source.window ? [source convertRect:source.bounds toView:dragView.superview] : CGRectZero;
+	CGRect home = source.window ? [source.imageView convertRect:source.imageView.bounds toView:dragView.superview] : CGRectZero;
 	[UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:0.85 initialSpringVelocity:0 options:0 animations:^{
 		if (!CGRectIsEmpty(home)) {
 			dragView.center = CGPointMake(CGRectGetMidX(home), CGRectGetMidY(home));
@@ -602,7 +994,7 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 		}
 		dragView.layer.shadowOpacity = 0;
 	} completion:^(BOOL finished) {
-		source.alpha = 1;
+		source.peeled = NO;
 		[dragView removeFromSuperview];
 	}];
 }

@@ -1,28 +1,27 @@
 #import "STKAppDelegate.h"
-#import "STKLibraryViewController.h"
-#import "STKStore.h"
 
+// The app only hosts the iMessage app and is hidden from the home screen (LSApplicationLaunchProhibited, like
+// Messages-only App Store apps). If something launches it anyway, it says where Peel lives.
 @implementation STKAppDelegate
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
-	[STKStore.sharedStore migrateFromAppGroup];
 	self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-	UINavigationController *navigation = [[UINavigationController alloc] initWithRootViewController:[STKLibraryViewController new]];
-	navigation.navigationBar.prefersLargeTitles = YES;
-	self.window.rootViewController = navigation;
+	UIViewController *controller = [UIViewController new];
+	controller.view.backgroundColor = UIColor.systemBackgroundColor;
+	UILabel *label = [UILabel new];
+	label.text = @"Peel lives in Messages and the emoji keyboard.\n\nIn Messages, open Peel in the app row to make, send and delete stickers. In any app, switch to the emoji keyboard and tap the sticker icon.";
+	label.numberOfLines = 0;
+	label.textAlignment = NSTextAlignmentCenter;
+	label.textColor = UIColor.secondaryLabelColor;
+	label.translatesAutoresizingMaskIntoConstraints = NO;
+	[controller.view addSubview:label];
+	[NSLayoutConstraint activateConstraints:@[
+		[label.centerYAnchor constraintEqualToAnchor:controller.view.centerYAnchor],
+		[label.leadingAnchor constraintEqualToAnchor:controller.view.layoutMarginsGuide.leadingAnchor],
+		[label.trailingAnchor constraintEqualToAnchor:controller.view.layoutMarginsGuide.trailingAnchor],
+	]];
+	self.window.rootViewController = controller;
 	[self.window makeKeyAndVisible];
-	return YES;
-}
-
-// josh-stickers://new, opened from the "Make a Sticker" button in the iMessage app.
-- (BOOL)application:(UIApplication *)application openURL:(NSURL *)url options:(NSDictionary<UIApplicationOpenURLOptionsKey, id> *)options {
-	if (![url.host isEqualToString:@"new"]) {
-		return NO;
-	}
-	UINavigationController *navigation = (UINavigationController *)self.window.rootViewController;
-	[navigation dismissViewControllerAnimated:NO completion:nil];
-	[navigation popToRootViewControllerAnimated:NO];
-	[(STKLibraryViewController *)navigation.viewControllers.firstObject pickPhoto];
 	return YES;
 }
 
