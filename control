@@ -1,6 +1,6 @@
 Package: com.flame.stickers
 Name: Peel
-Version: 1.8.0
+Version: 1.0.0
 Architecture: iphoneos-arm64
 Description: Make your own stickers from photos (with background removal), use them from a Stickers section in the emoji keyboard, and peel-and-drag them onto message bubbles.
 Maintainer: flame
