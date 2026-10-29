@@ -112,5 +112,3 @@ Animated stickers are HEICS (HEVC frames with alpha, the format of iOS 17's live
 - Background removal isn't available on chips older than A12. You can still make stickers from images that are already transparent.
 
 ---
-
-<sub>Screenshots were taken in the iOS 16.4 simulator with the real keyboard tweak and sticker maker running. The stickers were made from real cat photos and GIFs by Peel's own sticker renderer; the simulator can't do background removal, so the cut-outs came from the same Vision subject lifting on a Mac.</sub>
