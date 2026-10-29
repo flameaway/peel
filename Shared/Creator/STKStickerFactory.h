@@ -18,6 +18,10 @@ typedef NS_ENUM(NSInteger, STKStrokeKind) {
 	STKStrokeKindLasso,
 	// A closed outline: the object found inside it (by background removal run on just that area).
 	STKStrokeKindSmartLasso,
+	// The whole image: what's kept is erased and what's erased comes back. Has no points.
+	STKStrokeKindInvert,
+	// The whole image: restoring brings back all of the original, erasing clears everything. Has no points.
+	STKStrokeKindWhole,
 };
 
 // One erase or restore edit, in coordinates normalized to the uncropped source image (0...1 on each axis), so the

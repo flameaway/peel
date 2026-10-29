@@ -78,8 +78,9 @@ static CKBrowserDragControllerTarget *STKTarget(CKChatController *chat, CGPoint 
 	return [targetClass targetWithScreenCoordinate:point initialSize:size scale:scale meshScaleFactor:1 rotation:rotation associatedLayoutIntent:0];
 }
 
-// Messages draws a placed sticker at its natural size (pixels / screen scale) times the target's scale.
-static double STKScaleForSize(NSURL *url, CGSize size, UIScreen *screen) {
+// Messages draws a placed sticker at its pixel size / 3 times the target's scale, on every screen
+// (-[CKUIBehavior stickerScreenScale] is always 3, see -[CKAssociatedStickerChatItem loadSizeThatFits:...]).
+static double STKScaleForSize(NSURL *url, CGSize size) {
 	// Read the pixel size from the header; decoding a frame of a HEICS sticker is slow.
 	CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
 	NSDictionary *properties = source ? CFBridgingRelease(CGImageSourceCopyPropertiesAtIndex(source, 0, NULL)) : nil;
@@ -87,7 +88,7 @@ static double STKScaleForSize(NSURL *url, CGSize size, UIScreen *screen) {
 		CFRelease(source);
 	}
 	CGFloat pixels = MAX([properties[(__bridge NSString *)kCGImagePropertyPixelWidth] doubleValue], [properties[(__bridge NSString *)kCGImagePropertyPixelHeight] doubleValue]);
-	CGFloat natural = pixels / (screen.scale ?: 3);
+	CGFloat natural = pixels / 3;
 	return natural > 0 ? MAX(size.width, size.height) / natural : 1;
 }
 
@@ -98,7 +99,7 @@ static double STKScaleForSize(NSURL *url, CGSize size, UIScreen *screen) {
 	return chat && [chat respondsToSelector:@selector(sendSticker:withDragTarget:)] && [chat respondsToSelector:@selector(selectedBalloonForTarget:)] && NSClassFromString(@"IMSticker");
 }
 
-// An IMSticker for the file, attributed to our iMessage app.
+// An IMSticker for the file, attributed to Apple's stickers app (see STKStickerPluginID).
 + (IMSticker *)stickerForURL:(NSURL *)url {
 	NSString *pluginID = STKStickerPluginID;
 	IMSticker *sticker = [[NSClassFromString(@"IMSticker") alloc] initWithStickerID:url.lastPathComponent stickerPackID:pluginID fileURL:url accessibilityLabel:@"Sticker" moodCategory:nil stickerName:nil];
@@ -122,7 +123,7 @@ static double STKScaleForSize(NSURL *url, CGSize size, UIScreen *screen) {
 		return NO;
 	}
 	CKChatController *chat = STKVisibleChatController();
-	CKBrowserDragControllerTarget *target = STKTarget(chat, point, size, STKScaleForSize(url, size, chat.view.window.screen), rotation);
+	CKBrowserDragControllerTarget *target = STKTarget(chat, point, size, STKScaleForSize(url, size), rotation);
 	// sendSticker:withDragTarget: indexes the chat items with this result without checking it, so never call it off a bubble.
 	if (!target || ![chat selectedBalloonForTarget:target]) {
 		return NO;

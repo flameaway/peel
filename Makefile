@@ -1,7 +1,7 @@
 TARGET := iphone:clang:16.5:15.0
 ARCHS = arm64 arm64e
 THEOS_PACKAGE_SCHEME = rootless
-INSTALL_TARGET_PROCESSES = Stickers MobileSMS
+INSTALL_TARGET_PROCESSES = MobileSMS
 
 # Theos picks debug or final build paths when it loads and hands them to the builds below, so decide before that.
 ifeq ($(MAKECMDGOALS),release)
@@ -10,7 +10,7 @@ endif
 
 include $(THEOS)/makefiles/common.mk
 
-SUBPROJECTS += StickersApp MessagesExtension EmojiStickers CreatorLibrary
+SUBPROJECTS += EmojiStickers CreatorLibrary
 
 include $(THEOS_MAKE_PATH)/aggregate.mk
 

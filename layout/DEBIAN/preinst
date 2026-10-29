@@ -1,0 +1,7 @@
+#!/bin/sh
+# Versions up to 1.7.0 shipped an iMessage app inside a hidden Stickers.app. Unregister it while its files are still
+# here; dpkg deletes them during the upgrade.
+if [ -d /var/jb/Applications/Stickers.app ] && [ -x /var/jb/usr/bin/uicache ]; then
+	/var/jb/usr/bin/uicache -u /var/jb/Applications/Stickers.app >/dev/null 2>&1 || true
+fi
+exit 0

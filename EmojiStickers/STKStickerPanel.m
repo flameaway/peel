@@ -11,6 +11,9 @@
 #endif
 
 static const CGFloat kDragStickerSide = 110;
+const CGFloat STKMaxDragScale = 3;
+// A held sticker let go within this distance of where it was picked up opens its menu instead.
+static const CGFloat kHoldSlop = 12;
 
 UIImage *STKStickerGlyph(CGFloat side) {
 	UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(side, side)];
@@ -153,7 +156,6 @@ static BOOL STKPasteItems(NSArray<NSDictionary<NSString *, id> *> *items) {
 }
 
 - (BOOL)hasItemsConformingToTypeIdentifiers:(NSArray<NSString *> *)typeIdentifiers {
-	NSLog(@"[EmojiStickers] drop session asked for types %@", typeIdentifiers);
 	for (UIDragItem *item in _items) {
 		if ([item.itemProvider hasItemConformingToTypeIdentifier:typeIdentifiers.firstObject] || [[item.itemProvider.registeredTypeIdentifiers filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *type, NSDictionary *bindings) {
 			for (NSString *wanted in typeIdentifiers) {
@@ -170,7 +172,6 @@ static BOOL STKPasteItems(NSArray<NSDictionary<NSString *, id> *> *items) {
 }
 
 - (BOOL)canLoadObjectsOfClass:(Class<NSItemProviderReading>)aClass {
-	NSLog(@"[EmojiStickers] drop session asked if it can load %@", aClass);
 	for (UIDragItem *item in _items) {
 		if ([item.itemProvider canLoadObjectOfClass:aClass]) {
 			return YES;
@@ -195,7 +196,6 @@ static BOOL STKPasteItems(NSArray<NSDictionary<NSString *, id> *> *items) {
 }
 
 - (NSProgress *)loadObjectsOfClass:(Class<NSItemProviderReading>)aClass completion:(void (^)(NSArray<__kindof id<NSItemProviderReading>> *objects))completion {
-	NSLog(@"[EmojiStickers] drop session loading %@", aClass);
 	NSProgress *progress = [NSProgress discreteProgressWithTotalUnitCount:_items.count];
 	NSMutableArray *objects = [NSMutableArray array];
 	dispatch_group_t group = dispatch_group_create();
@@ -250,19 +250,11 @@ static BOOL STKDropItems(NSArray<NSDictionary<NSString *, id> *> *items) {
 	}
 	for (UIView *view = field; view; view = view.superview) {
 		for (id<UIInteraction> interaction in view.interactions) {
-			if ([interaction isKindOfClass:UIDropInteraction.class]) {
-				NSLog(@"[EmojiStickers] (all) drop target %@ on %@", [(UIDropInteraction *)interaction delegate].class, view.class);
-			}
-		}
-	}
-	for (UIView *view = field; view; view = view.superview) {
-		for (id<UIInteraction> interaction in view.interactions) {
 			if (![interaction isKindOfClass:UIDropInteraction.class]) {
 				continue;
 			}
 			UIDropInteraction *drop = (UIDropInteraction *)interaction;
 			id<UIDropInteractionDelegate> delegate = drop.delegate;
-			NSLog(@"[EmojiStickers] drop target %@ on %@ (app's own %d)", [delegate class], view.class, STKIsAppClass(delegate));
 			if (!STKIsAppClass(delegate) || ![delegate respondsToSelector:@selector(dropInteraction:performDrop:)]) {
 				continue;
 			}
@@ -341,9 +333,18 @@ static void STKInsertSticker(NSURL *url, void (^completion)(BOOL inserted)) {
 - (void)updateAnimationTimerObserving;
 - (CGPoint)dragViewCenter;
 - (CGSize)initialSize;
-// The view is drawn at initialSize times both of these.
-- (double)initialScale;
+// The frame of the drag image it's showing now.
+- (id)currentFrameImage;
+- (void)setInitialSize:(CGSize)size;
+// The view's bounds: the drag image fitted into the source rect. It's drawn at this times dragViewScaleUp (which grows
+// it to initialSize when the image is smaller) times dragViewScale.
+- (CGSize)rasterizedImageSize;
+- (double)dragViewScaleUp;
 - (double)dragViewScale;
+// Past 2 only with the tweak's hook (see Tweak.x).
+- (void)setDragViewScale:(double)scale;
+- (double)rotationAngle;
+- (void)setRotationAngle:(double)angle;
 - (void)reversePeelAnimationToPoint:(CGPoint)point forPlacement:(BOOL)placement shouldShrink:(BOOL)shrink completionBlock:(void (^)(void))completion;
 @end
 
@@ -360,6 +361,48 @@ static CGRect STKAspectFitRect(CGSize size, CGRect bounds) {
 	CGFloat factor = MIN(bounds.size.width / size.width, bounds.size.height / size.height);
 	CGSize fitted = CGSizeMake(size.width * factor, size.height * factor);
 	return CGRectMake(CGRectGetMidX(bounds) - fitted.width / 2, CGRectGetMidY(bounds) - fitted.height / 2, fitted.width, fitted.height);
+}
+
+// From the finger to the middle of the sticker it peeled off, once it has grown by the given factor: the spot it was
+// held by stays under the finger as it lifts, instead of the sticker jumping to the fingertip.
+static CGPoint STKHeldOffset(CGRect start, CGPoint touch, CGFloat grow) {
+	if (!isfinite(grow) || grow <= 0) {
+		grow = 1;
+	}
+	return CGPointMake((CGRectGetMidX(start) - touch.x) * grow, (CGRectGetMidY(start) - touch.y) * grow);
+}
+
+// The frame an animated image view is showing right now, going by what its layer has on screen. 0 if it can't tell.
+static NSUInteger STKShownFrameIndex(UIImageView *view) {
+	NSArray<UIImage *> *frames = view.image.images;
+	id contents = view.layer.presentationLayer.contents ?: view.layer.contents;
+	for (NSUInteger i = 0; contents && i < frames.count; i++) {
+		if ((__bridge id)frames[i].CGImage == contents) {
+			return i;
+		}
+	}
+	return 0;
+}
+
+// Where a frame is in frames, whether it's one of the images or its CGImage. NSNotFound if it isn't.
+static NSUInteger STKIndexOfFrame(NSArray<UIImage *> *frames, id frame) {
+	for (NSUInteger i = 0; frame && i < frames.count; i++) {
+		if (frames[i] == frame || (__bridge id)frames[i].CGImage == frame || ([frame isKindOfClass:UIImage.class] && ((UIImage *)frame).CGImage == frames[i].CGImage)) {
+			return i;
+		}
+	}
+	return NSNotFound;
+}
+
+// The animated image playing from the given frame on, so an animation can carry on where another copy of it is.
+static UIImage *STKAnimatedImageStartingAt(UIImage *image, NSUInteger index) {
+	NSArray<UIImage *> *frames = image.images;
+	if (frames.count <= 1 || index % frames.count == 0) {
+		return image;
+	}
+	index %= frames.count;
+	NSArray<UIImage *> *turned = [[frames subarrayWithRange:NSMakeRange(index, frames.count - index)] arrayByAddingObjectsFromArray:[frames subarrayWithRange:NSMakeRange(0, index)]];
+	return [UIImage animatedImageWithImages:turned duration:image.duration];
 }
 
 static BOOL STKNativePeelAvailable(void) {
@@ -383,8 +426,9 @@ static UIImage *STKStickerOutline(UIImage *image, CGSize size) {
 	if (!image || size.width <= 0 || size.height <= 0) {
 		return nil;
 	}
-	CGRect fit = STKAspectFitRect(image.size, CGRectMake(0, 0, size.width, size.height));
 	CGFloat line = 2;
+	// Inside the sticker's own edge, so the sticker settling back covers it whole.
+	CGRect fit = CGRectInset(STKAspectFitRect(image.size, CGRectMake(0, 0, size.width, size.height)), line, line);
 	UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:size];
 	UIImage *outline = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
 		// The silhouette spread outward by the line width...
@@ -406,6 +450,11 @@ static UIImage *STKStickerOutline(UIImage *image, CGSize size) {
 @property (nonatomic, copy) NSURL *url;
 // While its sticker is being dragged, the cell shows only the sticker's outline.
 @property (nonatomic, getter=isPeeled) BOOL peeled;
+// Wiggles while the stickers are being rearranged.
+@property (nonatomic, getter=isJiggling) BOOL jiggling;
+// Done being dragged: the outline fades away. With fadeIn the sticker fades back in over it; otherwise (landing on
+// it from the drag) it's there at once.
+- (void)settleBackFadingIn:(BOOL)fadeIn;
 @end
 
 @implementation STKPanelCell {
@@ -430,11 +479,30 @@ static UIImage *STKStickerOutline(UIImage *image, CGSize size) {
 - (void)prepareForReuse {
 	[super prepareForReuse];
 	self.peeled = NO;
+	self.jiggling = NO;
+}
+
+- (void)setJiggling:(BOOL)jiggling {
+	_jiggling = jiggling;
+	if (!jiggling) {
+		[self.contentView.layer removeAnimationForKey:@"jiggle"];
+		return;
+	}
+	if (![self.contentView.layer animationForKey:@"jiggle"]) {
+		CAKeyframeAnimation *jiggle = [CAKeyframeAnimation animationWithKeyPath:@"transform.rotation.z"];
+		jiggle.values = @[@(-0.035), @0.035, @(-0.035)];
+		jiggle.duration = 0.28;
+		jiggle.repeatCount = HUGE_VALF;
+		// Out of step with the neighbours, like the home screen.
+		jiggle.timeOffset = arc4random_uniform(280) / 1000.0;
+		[self.contentView.layer addAnimation:jiggle forKey:@"jiggle"];
+	}
 }
 
 - (void)setPeeled:(BOOL)peeled {
 	_peeled = peeled;
 	[_outlineView.layer removeAllAnimations];
+	[self.imageView.layer removeAnimationForKey:@"opacity"];
 	self.imageView.alpha = peeled ? 0 : 1;
 	if (!peeled) {
 		_outlineView.alpha = 0;
@@ -448,6 +516,26 @@ static UIImage *STKStickerOutline(UIImage *image, CGSize size) {
 	} completion:nil];
 }
 
+- (void)settleBackFadingIn:(BOOL)fadeIn {
+	if (!_peeled) {
+		return;
+	}
+	_peeled = NO;
+	[_outlineView.layer removeAllAnimations];
+	[self.imageView.layer removeAnimationForKey:@"opacity"];
+	if (!fadeIn) {
+		self.imageView.alpha = 1;
+	}
+	[UIView animateWithDuration:0.3 delay:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
+		self.imageView.alpha = 1;
+		self->_outlineView.alpha = 0;
+	} completion:^(BOOL finished) {
+		if (!self->_peeled) {
+			self->_outlineView.image = nil;
+		}
+	}];
+}
+
 - (void)setHighlighted:(BOOL)highlighted {
 	[super setHighlighted:highlighted];
 	[UIView animateWithDuration:0.12 animations:^{
@@ -457,11 +545,14 @@ static UIImage *STKStickerOutline(UIImage *image, CGSize size) {
 
 @end
 
-// The "+" tile that opens the sticker maker.
+// The "+" tile that opens the sticker maker, or a checkmark that ends rearranging.
 @interface STKAddCell : UICollectionViewCell
+- (void)setDone:(BOOL)done;
 @end
 
-@implementation STKAddCell
+@implementation STKAddCell {
+	UIImageView *_plus;
+}
 
 - (instancetype)initWithFrame:(CGRect)frame {
 	if ((self = [super initWithFrame:frame])) {
@@ -476,10 +567,17 @@ static UIImage *STKStickerOutline(UIImage *image, CGSize size) {
 		plus.frame = self.contentView.bounds;
 		plus.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 		[self.contentView addSubview:plus];
+		_plus = plus;
 		self.accessibilityLabel = @"Make Sticker";
 		self.isAccessibilityElement = YES;
 	}
 	return self;
+}
+
+- (void)setDone:(BOOL)done {
+	_plus.image = [UIImage systemImageNamed:done ? @"checkmark" : @"plus" withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:26 weight:UIImageSymbolWeightMedium]];
+	_plus.tintColor = done ? UIColor.labelColor : UIColor.secondaryLabelColor;
+	self.accessibilityLabel = done ? @"Done" : @"Make Sticker";
 }
 
 - (void)layoutSubviews {
@@ -535,7 +633,7 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 	return present;
 }
 
-@interface STKStickerPanel () <UICollectionViewDataSource, UICollectionViewDelegateFlowLayout, UIGestureRecognizerDelegate>
+@interface STKStickerPanel () <UICollectionViewDataSource, UICollectionViewDelegateFlowLayout, UIGestureRecognizerDelegate, UIEditMenuInteractionDelegate>
 @end
 
 @implementation STKStickerPanel {
@@ -546,13 +644,32 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 	NSOperationQueue *_loadQueue;
 	NSMutableSet<NSURL *> *_loading;
 	UIView *_toast;
+	UILongPressGestureRecognizer *_peelGesture;
+	// Stickers wiggle and holding one moves it around the grid; the "+" tile turns into Done.
+	BOOL _rearranging;
+	// The hold menu (a UIEditMenuInteraction on iOS 16) and the sticker it's for.
+	id _editMenu;
+	NSURL *_menuURL;
+	CGRect _menuTargetRect;
 
 	// Drag state.
 	NSURL *_dragURL;
+	CGPoint _dragStartTouch;
+	BOOL _dragMoved;
+	// A second finger anywhere on screen resizes and turns the held sticker, caught by a view covering the window.
+	UIView *_resizeOverlay;
+	UIPanGestureRecognizer *_resizeGesture;
+	CGPoint _resizeLastTouch;
+	BOOL _dragResized;
+	CGFloat _dragScale;
+	CGFloat _dragRotation;
 	UIImageView *_dragView;
 	// In Messages: its native peeling sticker, in a container covering the window.
 	CKBrowserDragStickerView *_peelView;
 	UIView *_peelContainer;
+	// The frames it was given, and the thumbnail animation they match frame for frame, to carry on in the grid from.
+	NSArray<UIImage *> *_peelFrames;
+	UIImage *_peelThumbnail;
 	STKPanelCell *_dragSourceCell;
 	CGPoint _dragTouchOffset;
 	BOOL _dragOverBubble;
@@ -587,6 +704,7 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 		peel.minimumPressDuration = 0.25;
 		peel.delegate = self;
 		[_collectionView addGestureRecognizer:peel];
+		_peelGesture = peel;
 
 		UILabel *hint = [UILabel new];
 		hint.text = @"Tap + to make a sticker from a photo, Live Photo or GIF";
@@ -609,6 +727,13 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 - (void)reload {
 	_stickers = [STKStore.sharedStore stickerURLs];
 	_emptyView.hidden = _stickers.count > 0;
+	[self setRearranging:NO];
+}
+
+- (void)setRearranging:(BOOL)rearranging {
+	_rearranging = rearranging && _stickers.count > 0;
+	// While rearranging, stickers pick up for moving sooner than they peel off.
+	_peelGesture.minimumPressDuration = _rearranging ? 0.12 : 0.25;
 	[_collectionView reloadData];
 }
 
@@ -640,10 +765,13 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 - (UICollectionViewCell *)collectionView:(UICollectionView *)collectionView cellForItemAtIndexPath:(NSIndexPath *)indexPath {
 	NSURL *url = [self stickerAtIndexPath:indexPath];
 	if (!url) {
-		return [collectionView dequeueReusableCellWithReuseIdentifier:@"Add" forIndexPath:indexPath];
+		STKAddCell *tile = [collectionView dequeueReusableCellWithReuseIdentifier:@"Add" forIndexPath:indexPath];
+		[tile setDone:_rearranging];
+		return tile;
 	}
 	STKPanelCell *cell = [collectionView dequeueReusableCellWithReuseIdentifier:@"Sticker" forIndexPath:indexPath];
 	cell.url = url;
+	cell.jiggling = _rearranging;
 	cell.imageView.image = [_thumbnails objectForKey:url];
 	if (!cell.imageView.image) {
 		[self loadThumbnailForURL:url];
@@ -673,6 +801,19 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 	}];
 }
 
+// A cell set up ahead of scrolling into view isn't among the visible cells yet, so a thumbnail that finished loading
+// in between never reached it.
+- (void)collectionView:(UICollectionView *)collectionView willDisplayCell:(UICollectionViewCell *)cell forItemAtIndexPath:(NSIndexPath *)indexPath {
+	if (![cell isKindOfClass:STKPanelCell.class] || ((STKPanelCell *)cell).imageView.image) {
+		return;
+	}
+	NSURL *url = ((STKPanelCell *)cell).url;
+	((STKPanelCell *)cell).imageView.image = [_thumbnails objectForKey:url];
+	if (!((STKPanelCell *)cell).imageView.image) {
+		[self loadThumbnailForURL:url];
+	}
+}
+
 - (CGSize)collectionView:(UICollectionView *)collectionView layout:(UICollectionViewFlowLayout *)layout sizeForItemAtIndexPath:(NSIndexPath *)indexPath {
 	CGFloat available = collectionView.bounds.size.width - layout.sectionInset.left - layout.sectionInset.right;
 	NSInteger columns = MAX(4, (NSInteger)(available / 92));
@@ -680,10 +821,34 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 	return CGSizeMake(side, side);
 }
 
+- (BOOL)collectionView:(UICollectionView *)collectionView canMoveItemAtIndexPath:(NSIndexPath *)indexPath {
+	return _rearranging && [self stickerAtIndexPath:indexPath];
+}
+
+- (NSIndexPath *)collectionView:(UICollectionView *)collectionView targetIndexPathForMoveFromItemAtIndexPath:(NSIndexPath *)original toProposedIndexPath:(NSIndexPath *)proposed {
+	// The tile in front stays first.
+	return proposed.item < 1 ? [NSIndexPath indexPathForItem:1 inSection:proposed.section] : proposed;
+}
+
+- (void)collectionView:(UICollectionView *)collectionView moveItemAtIndexPath:(NSIndexPath *)source toIndexPath:(NSIndexPath *)destination {
+	NSMutableArray<NSURL *> *stickers = [_stickers mutableCopy];
+	NSURL *url = stickers[source.item - 1];
+	[stickers removeObjectAtIndex:source.item - 1];
+	[stickers insertObject:url atIndex:destination.item - 1];
+	_stickers = stickers;
+	[STKStore.sharedStore setStickerOrder:stickers];
+}
+
 - (void)collectionView:(UICollectionView *)collectionView didSelectItemAtIndexPath:(NSIndexPath *)indexPath {
 	[collectionView deselectItemAtIndexPath:indexPath animated:NO];
 	[UIDevice.currentDevice playInputClick];
 	NSURL *url = [self stickerAtIndexPath:indexPath];
+	if (_rearranging) {
+		if (!url) {
+			[self setRearranging:NO];
+		}
+		return;
+	}
 	if (url) {
 		STKInsertSticker(url, ^(BOOL inserted) {
 			if (!inserted) {
@@ -737,13 +902,89 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 	}];
 }
 
+#pragma mark - Hold menu
+
+// Offered when a sticker is held and let go without dragging it anywhere.
+- (void)showMenuForSticker:(NSURL *)url cell:(STKPanelCell *)cell {
+	if (!cell.window) {
+		return;
+	}
+	_menuURL = url;
+	_menuTargetRect = cell.frame;
+	if (@available(iOS 16, *)) {
+		if (!_editMenu) {
+			_editMenu = [[UIEditMenuInteraction alloc] initWithDelegate:self];
+			[_collectionView addInteraction:_editMenu];
+		}
+		UIEditMenuConfiguration *configuration = [UIEditMenuConfiguration configurationWithIdentifier:nil sourcePoint:CGPointMake(CGRectGetMidX(cell.frame), CGRectGetMinY(cell.frame))];
+		configuration.preferredArrowDirection = UIEditMenuArrowDirectionDown;
+		[(UIEditMenuInteraction *)_editMenu presentEditMenuWithConfiguration:configuration];
+		return;
+	}
+	UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+	[sheet addAction:[UIAlertAction actionWithTitle:@"Rearrange" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+		[self setRearranging:YES];
+	}]];
+	[sheet addAction:[UIAlertAction actionWithTitle:@"Delete" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+		[self deleteSticker:url];
+	}]];
+	[sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+	sheet.popoverPresentationController.sourceView = cell;
+	sheet.popoverPresentationController.sourceRect = cell.bounds;
+	[STKTopViewController() presentViewController:sheet animated:YES completion:nil];
+}
+
+- (UIMenu *)editMenuInteraction:(UIEditMenuInteraction *)interaction menuForConfiguration:(UIEditMenuConfiguration *)configuration suggestedActions:(NSArray<UIMenuElement *> *)suggestedActions API_AVAILABLE(ios(16.0)) {
+	NSURL *url = _menuURL;
+	__weak typeof(self) weakSelf = self;
+	UIAction *rearrange = [UIAction actionWithTitle:@"Rearrange" image:nil identifier:nil handler:^(UIAction *action) {
+		[weakSelf setRearranging:YES];
+	}];
+	UIAction *delete = [UIAction actionWithTitle:@"Delete" image:nil identifier:nil handler:^(UIAction *action) {
+		[weakSelf deleteSticker:url];
+	}];
+	delete.attributes = UIMenuElementAttributesDestructive;
+	return [UIMenu menuWithChildren:@[rearrange, delete]];
+}
+
+// Keeps the menu clear of the sticker it's for.
+- (CGRect)editMenuInteraction:(UIEditMenuInteraction *)interaction targetRectForConfiguration:(UIEditMenuConfiguration *)configuration API_AVAILABLE(ios(16.0)) {
+	return _menuTargetRect;
+}
+
+- (void)deleteSticker:(NSURL *)url {
+	NSUInteger index = [_stickers indexOfObject:url];
+	if (index == NSNotFound) {
+		return;
+	}
+	if (![STKStore.sharedStore removeStickerAtURL:url error:nil]) {
+		[self showToast:@"The sticker couldn't be deleted."];
+		return;
+	}
+	NSMutableArray<NSURL *> *stickers = [_stickers mutableCopy];
+	[stickers removeObjectAtIndex:index];
+	_stickers = stickers;
+	[_thumbnails removeObjectForKey:url];
+	if (!stickers.count) {
+		_emptyView.hidden = NO;
+		[self setRearranging:NO];
+		return;
+	}
+	[_collectionView deleteItemsAtIndexPaths:@[[NSIndexPath indexPathForItem:index + 1 inSection:0]]];
+}
+
 #pragma mark - Peel and drag
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
-	return NO;
+	// Only the second finger resizing a held sticker works alongside the finger holding it.
+	return gestureRecognizer == _resizeGesture || other == _resizeGesture;
 }
 
 - (void)peel:(UILongPressGestureRecognizer *)gesture {
+	if (_rearranging) {
+		[self moveSticker:gesture];
+		return;
+	}
 	UIWindow *window = self.window;
 	switch (gesture.state) {
 		case UIGestureRecognizerStateBegan: {
@@ -756,6 +997,7 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 				return;
 			}
 			[self beginDragFromCell:cell url:url touch:[gesture locationInView:window]];
+			[self addResizeOverlay];
 			break;
 		}
 		case UIGestureRecognizerStateChanged:
@@ -773,20 +1015,110 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 	}
 }
 
+// While rearranging, holding a sticker picks it up to move it around the grid instead of peeling it off.
+- (void)moveSticker:(UILongPressGestureRecognizer *)gesture {
+	CGPoint point = [gesture locationInView:_collectionView];
+	switch (gesture.state) {
+		case UIGestureRecognizerStateBegan: {
+			NSIndexPath *indexPath = [_collectionView indexPathForItemAtPoint:point];
+			if (!indexPath || ![self stickerAtIndexPath:indexPath] || ![_collectionView beginInteractiveMovementForItemAtIndexPath:indexPath]) {
+				gesture.enabled = NO;
+				gesture.enabled = YES;
+				return;
+			}
+			[[UIImpactFeedbackGenerator.alloc initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+			break;
+		}
+		case UIGestureRecognizerStateChanged:
+			[_collectionView updateInteractiveMovementTargetPosition:point];
+			break;
+		case UIGestureRecognizerStateEnded:
+			[_collectionView endInteractiveMovement];
+			break;
+		default:
+			[_collectionView cancelInteractiveMovement];
+			break;
+	}
+}
+
+- (void)addResizeOverlay {
+	UIWindow *window = self.window;
+	if (!window) {
+		return;
+	}
+	_resizeOverlay = [[UIView alloc] initWithFrame:window.bounds];
+	_resizeOverlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+	_resizeGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(resize:)];
+	_resizeGesture.maximumNumberOfTouches = 1;
+	_resizeGesture.delegate = self;
+	[_resizeOverlay addGestureRecognizer:_resizeGesture];
+	[window addSubview:_resizeOverlay];
+}
+
+- (void)removeResizeOverlay {
+	[_resizeOverlay removeFromSuperview];
+	_resizeOverlay = nil;
+	_resizeGesture = nil;
+}
+
+// Like Messages: moving the second finger away from the sticker or toward it grows or shrinks it, and circling it
+// turns it.
+- (void)resize:(UIPanGestureRecognizer *)gesture {
+	CGPoint touch = [gesture locationInView:self.window];
+	if (gesture.state == UIGestureRecognizerStateChanged && (_peelView || _dragView)) {
+		CGPoint center = _peelView ? [_peelView dragViewCenter] : _dragView.center;
+		CGPoint from = CGPointMake(_resizeLastTouch.x - center.x, _resizeLastTouch.y - center.y);
+		CGPoint to = CGPointMake(touch.x - center.x, touch.y - center.y);
+		// Right by the sticker's middle, small moves would swing its size and angle wildly.
+		if (hypot(from.x, from.y) > 20 && hypot(to.x, to.y) > 20) {
+			CGFloat turn = remainder(atan2(to.y, to.x) - atan2(from.y, from.x), 2 * M_PI);
+			[self setDragScale:_dragScale * hypot(to.x, to.y) / hypot(from.x, from.y) rotation:_dragRotation + turn];
+			_dragResized = YES;
+		}
+	}
+	_resizeLastTouch = touch;
+}
+
+- (void)setDragScale:(CGFloat)scale rotation:(CGFloat)rotation {
+	_dragScale = MIN(MAX(scale, 1), STKMaxDragScale);
+	_dragRotation = rotation;
+	if (!_peelView) {
+		_dragView.transform = [self dragTransform];
+		return;
+	}
+	if ([_peelView respondsToSelector:@selector(setDragViewScale:)] && [_peelView respondsToSelector:@selector(setRotationAngle:)]) {
+		[_peelView setDragViewScale:_dragScale];
+		[_peelView setRotationAngle:_dragRotation];
+		// Without the tweak's hook Messages stops at 2x.
+		_dragScale = [_peelView dragViewScale];
+	}
+}
+
+// The stand-in drag view's transform: resized and turned by a second finger, tilted a little while held, and
+// grown a little over a bubble it can stick to.
+- (CGAffineTransform)dragTransform {
+	CGFloat scale = _dragScale * (_dragOverBubble ? 1.08 : 1);
+	return CGAffineTransformScale(CGAffineTransformMakeRotation(-0.06 + _dragRotation), scale, scale);
+}
+
 - (void)beginDragFromCell:(STKPanelCell *)cell url:(NSURL *)url touch:(CGPoint)touch {
 	UIWindow *window = self.window;
 	_dragURL = url;
 	_dragSourceCell = cell;
 	_dragOverBubble = NO;
-	// Lift the sticker above the finger so it isn't hidden underneath it.
-	_dragTouchOffset = CGPointMake(0, -kDragStickerSide * 0.45);
+	_dragStartTouch = touch;
+	_dragMoved = NO;
+	_dragResized = NO;
+	_dragScale = 1;
+	_dragRotation = 0;
 	if ([STKMessagesBridge isAvailable] && STKNativePeelAvailable() && [self beginNativePeelFromCell:cell touch:touch]) {
 		return;
 	}
 
 	CGRect start = [cell.imageView convertRect:cell.imageView.bounds toView:window];
-	// Peel off the thumbnail already on screen right away; loading a larger copy can take a while.
-	_dragView = [[UIImageView alloc] initWithImage:cell.imageView.image];
+	// Peel off the thumbnail already on screen right away; loading a larger copy can take a while. An animation
+	// carries on from the frame it's at.
+	_dragView = [[UIImageView alloc] initWithImage:STKAnimatedImageStartingAt(cell.imageView.image, STKShownFrameIndex(cell.imageView))];
 	UIImageView *dragView = _dragView;
 	if (cell.imageView.image.images.count <= 1) {
 		// Sharpen stills once loaded. Animations keep the thumbnail, since swapping would restart them mid-drag.
@@ -811,11 +1143,12 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 	[window addSubview:_dragView];
 	cell.peeled = YES;
 
+	_dragTouchOffset = STKHeldOffset(start, touch, kDragStickerSide / start.size.width);
 	CGPoint lifted = CGPointMake(touch.x + _dragTouchOffset.x, touch.y + _dragTouchOffset.y);
 	[[UIImpactFeedbackGenerator.alloc initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
 	[UIView animateWithDuration:0.28 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
 		self->_dragView.center = lifted;
-		self->_dragView.transform = CGAffineTransformMakeRotation(-0.06);
+		self->_dragView.transform = [self dragTransform];
 	} completion:nil];
 	CABasicAnimation *shadow = [CABasicAnimation animationWithKeyPath:@"shadowOpacity"];
 	shadow.fromValue = @0;
@@ -828,7 +1161,8 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 // Peels the sticker off the grid the way Messages' sticker drawer does. NO if the drag view couldn't be made.
 - (BOOL)beginNativePeelFromCell:(STKPanelCell *)cell touch:(CGPoint)touch {
 	UIWindow *window = self.window;
-	UIImage *image = cell.imageView.image;
+	// An animation carries on from the frame it's at.
+	UIImage *image = STKAnimatedImageStartingAt(cell.imageView.image, STKShownFrameIndex(cell.imageView));
 	NSArray<UIImage *> *thumbnails = image.images.count > 1 ? image.images : (image ? @[image] : nil);
 	if (!thumbnails) {
 		return NO;
@@ -858,11 +1192,19 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 	_peelContainer.userInteractionEnabled = NO;
 	[window addSubview:_peelContainer];
 	_peelView = peelView;
+	_peelFrames = frames;
+	_peelThumbnail = image.images.count > 1 ? image : nil;
 	[peelView setCanPeel:YES];
 	[peelView setPressed:YES];
 	[_peelContainer addSubview:peelView];
 	cell.peeled = YES;
 
+	// It peels up from the source rect's size to rasterizedImageSize times dragViewScaleUp.
+	CGFloat grow = 1;
+	if ([peelView respondsToSelector:@selector(rasterizedImageSize)] && [peelView respondsToSelector:@selector(dragViewScaleUp)] && start.size.width > 0) {
+		grow = [peelView rasterizedImageSize].width * [peelView dragViewScaleUp] / start.size.width;
+	}
+	_dragTouchOffset = STKHeldOffset(start, touch, grow);
 	CGPoint lifted = CGPointMake(touch.x + _dragTouchOffset.x, touch.y + _dragTouchOffset.y);
 	[[UIImpactFeedbackGenerator.alloc initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
 	[peelView animatePeelWithCompletion:nil];
@@ -878,6 +1220,7 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 }
 
 - (void)moveDragTo:(CGPoint)touch {
+	_dragMoved = _dragMoved || hypot(touch.x - _dragStartTouch.x, touch.y - _dragStartTouch.y) > kHoldSlop;
 	if (_peelView) {
 		[_peelView updateElasticEffectsForLocation:CGPointMake(touch.x + _dragTouchOffset.x, touch.y + _dragTouchOffset.y)];
 		BOOL overBubble = [STKMessagesBridge canPlaceStickerAtScreenPoint:[self screenPointForWindowPoint:[_peelView dragViewCenter]]];
@@ -898,8 +1241,7 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 			[[UISelectionFeedbackGenerator new] selectionChanged];
 		}
 		[UIView animateWithDuration:0.15 animations:^{
-			CGFloat scale = overBubble ? 1.08 : 1;
-			self->_dragView.transform = CGAffineTransformScale(CGAffineTransformMakeRotation(-0.06), scale, scale);
+			self->_dragView.transform = [self dragTransform];
 		}];
 	}
 }
@@ -907,28 +1249,51 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 - (void)endNativePeelAt:(CGPoint)touch cancelled:(BOOL)cancelled {
 	CKBrowserDragStickerView *peelView = _peelView;
 	UIView *container = _peelContainer;
+	NSArray<UIImage *> *frames = _peelFrames;
+	UIImage *thumbnail = _peelThumbnail;
 	_peelView = nil;
 	_peelContainer = nil;
+	_peelFrames = nil;
+	_peelThumbnail = nil;
 	[peelView detachElasticEffects];
 	CGPoint center = [peelView dragViewCenter];
 	BOOL overKeyboard = CGRectContainsPoint([[self keyboardHostView] convertRect:[self keyboardHostView].bounds toView:self.window], center);
-	// Stick it down at the size it was shown while dragging.
-	CGSize size = [peelView initialSize];
-	if ([peelView respondsToSelector:@selector(initialScale)] && [peelView respondsToSelector:@selector(dragViewScale)]) {
-		CGFloat scale = [peelView initialScale] * [peelView dragViewScale];
-		size = CGSizeMake(size.width * scale, size.height * scale);
-	}
-	BOOL placed = !cancelled && !overKeyboard && [STKMessagesBridge placeStickerAtURL:_dragURL screenPoint:[self screenPointForWindowPoint:center] size:size rotation:0];
+	// Stick it down at the size it was shown while dragging (leaving out the elastic wobble).
+	CGSize size = [peelView respondsToSelector:@selector(rasterizedImageSize)] ? [peelView rasterizedImageSize] : peelView.bounds.size;
+	CGFloat scale = ([peelView respondsToSelector:@selector(dragViewScaleUp)] ? [peelView dragViewScaleUp] : 1) * ([peelView respondsToSelector:@selector(dragViewScale)] ? [peelView dragViewScale] : 1);
+	size = CGSizeMake(size.width * scale, size.height * scale);
+	BOOL placed = !cancelled && !overKeyboard && [STKMessagesBridge placeStickerAtURL:_dragURL screenPoint:[self screenPointForWindowPoint:center] size:size rotation:_dragRotation];
 	STKPanelCell *source = _dragSourceCell;
 	if (placed) {
 		[[UIImpactFeedbackGenerator.alloc initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
-		source.peeled = NO;
+		[source settleBackFadingIn:YES];
 	}
 	// Sticks it down where it was dropped, or settles it back into the grid.
 	UIView *sourceImage = source.imageView;
 	CGPoint home = source.window ? [sourceImage convertPoint:CGPointMake(CGRectGetMidX(sourceImage.bounds), CGRectGetMidY(sourceImage.bounds)) toView:container] : center;
+	if (!placed && source.window && [peelView respondsToSelector:@selector(setInitialSize:)]) {
+		// It peeled off the thumbnail while it was shrunk under the finger, and going home it heads for that size
+		// (initialSize, by way of dragViewScaleUp). Land at the thumbnail's full size instead, so it doesn't settle
+		// small and then pop bigger as the thumbnail takes over.
+		UIImageView *thumbnail = source.imageView;
+		[peelView setInitialSize:STKAspectFitRect(thumbnail.image.size, thumbnail.bounds).size];
+	}
+	if (!placed && (_dragScale != 1 || _dragRotation != 0) && [peelView respondsToSelector:@selector(setDragViewScale:)] && [peelView respondsToSelector:@selector(setRotationAngle:)]) {
+		// Back to the size and angle it peeled off at on the way home.
+		[UIView animateWithDuration:0.25 animations:^{
+			[peelView setDragViewScale:1];
+			[peelView setRotationAngle:0];
+		}];
+	}
 	[peelView reversePeelAnimationToPoint:placed ? center : home forPlacement:placed shouldShrink:NO completionBlock:^{
-		source.peeled = NO;
+		if (!placed && thumbnail && [peelView respondsToSelector:@selector(currentFrameImage)]) {
+			// Back in the grid, the animation carries on from the frame it landed on.
+			NSUInteger frame = STKIndexOfFrame(frames, [peelView currentFrameImage]);
+			if (frame != NSNotFound && source.imageView.image.images.count == thumbnail.images.count) {
+				source.imageView.image = STKAnimatedImageStartingAt(thumbnail, frame);
+			}
+		}
+		[source settleBackFadingIn:NO];
 		[container removeFromSuperview];
 	}];
 }
@@ -943,6 +1308,18 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 }
 
 - (void)endDragAt:(CGPoint)touch cancelled:(BOOL)cancelled {
+	[self removeResizeOverlay];
+	// Held still and let go: settle it back and offer its menu.
+	BOOL showMenu = !cancelled && !_dragMoved && !_dragResized;
+	NSURL *url = _dragURL;
+	STKPanelCell *source = _dragSourceCell;
+	[self finishDragAt:touch cancelled:cancelled || showMenu];
+	if (showMenu) {
+		[self showMenuForSticker:url cell:source];
+	}
+}
+
+- (void)finishDragAt:(CGPoint)touch cancelled:(BOOL)cancelled {
 	if (_peelView) {
 		[self endNativePeelAt:touch cancelled:cancelled];
 		return;
@@ -960,7 +1337,9 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 	BOOL placed = NO;
 	if (!cancelled && !overKeyboard) {
 		if ([STKMessagesBridge isAvailable]) {
-			placed = [STKMessagesBridge placeStickerAtURL:_dragURL screenPoint:screenPoint size:CGSizeMake(kDragStickerSide, kDragStickerSide) rotation:0];
+			// At the size it's shown, grown over the bubble (see dragTransform).
+			CGFloat side = kDragStickerSide * _dragScale * (_dragOverBubble ? 1.08 : 1);
+			placed = [STKMessagesBridge placeStickerAtURL:_dragURL screenPoint:screenPoint size:CGSizeMake(side, side) rotation:_dragRotation];
 		} else {
 			placed = YES;
 			STKInsertSticker(_dragURL, ^(BOOL inserted) {
@@ -974,7 +1353,7 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 	STKPanelCell *source = _dragSourceCell;
 	if (placed) {
 		[[UIImpactFeedbackGenerator.alloc initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
-		source.peeled = NO;
+		[source settleBackFadingIn:YES];
 		[UIView animateWithDuration:0.2 animations:^{
 			dragView.transform = CGAffineTransformMakeScale(0.9, 0.9);
 			dragView.alpha = 0;
@@ -994,7 +1373,11 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 		}
 		dragView.layer.shadowOpacity = 0;
 	} completion:^(BOOL finished) {
-		source.peeled = NO;
+		// Back in the grid, an animation carries on from the frame it landed on.
+		if (dragView.image.images.count > 1 && source.imageView.image.images.count == dragView.image.images.count) {
+			source.imageView.image = STKAnimatedImageStartingAt(dragView.image, STKShownFrameIndex(dragView));
+		}
+		[source settleBackFadingIn:NO];
 		[dragView removeFromSuperview];
 	}];
 }

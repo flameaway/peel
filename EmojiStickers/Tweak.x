@@ -259,25 +259,28 @@ static BOOL STKSyncKeyGeometry(UIKeyboardEmojiCategoryBar *bar) {
 
 %end
 
-// Stickers sent from our iMessage app's drawer are attributed to it by Messages itself. Attribute them like the ones
-// sent from the keyboard instead, so they can be saved on iOS 17 and later.
-@interface IMSticker : NSObject
+// Messages' sticker drag view, which its drawer and our panel both peel stickers into.
+@interface CKBrowserDragStickerView : UIView
+- (void)applyTransforms;
 @end
-
-static NSString *STKAttributedPluginID(NSString *pluginID) {
-	return [pluginID hasSuffix:@":com.josh.stickers.messages"] ? STKStickerPluginID : pluginID;
-}
 
 %group Messages
 
-%hook IMSticker
+%hook CKBrowserDragStickerView
 
-- (NSString *)stickerPackGUID {
-	return STKAttributedPluginID(%orig);
-}
-
-- (NSString *)ballonBundleID {
-	return STKAttributedPluginID(%orig);
+// Dragging a sticker, a second finger grows it, but this setter clamps it to 1...2x. Same clamp, up to STKMaxDragScale.
+- (void)setDragViewScale:(double)scale {
+	Ivar ivar = class_getInstanceVariable(object_getClass(self), "_dragViewScale");
+	if (!ivar || strcmp(ivar_getTypeEncoding(ivar), @encode(double)) != 0 || ![self respondsToSelector:@selector(applyTransforms)]) {
+		%orig;
+		return;
+	}
+	scale = MIN(MAX(scale, 1), STKMaxDragScale);
+	double *storage = (double *)((uint8_t *)(__bridge void *)self + ivar_getOffset(ivar));
+	if (*storage != scale) {
+		*storage = scale;
+		[self applyTransforms];
+	}
 }
 
 %end
@@ -286,7 +289,7 @@ static NSString *STKAttributedPluginID(NSString *pluginID) {
 
 %ctor {
 	%init;
-	if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.MobileSMS"] && objc_getClass("IMSticker")) {
+	if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.MobileSMS"] && objc_getClass("CKBrowserDragStickerView")) {
 		%init(Messages);
 	}
 }

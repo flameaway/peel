@@ -10,8 +10,9 @@ typedef NS_ENUM(NSInteger, STKBrushMode) {
 	STKBrushModeRestore,
 };
 
-// Segment order of the tool picker, matching STKStrokeKind.
-static NSString *const kToolTitles[] = {@"Brush", @"Lasso", @"Smart Lasso"};
+// Segment order of the tool picker, matching STKStrokeKind up to Move, which only pans and zooms.
+static NSString *const kToolTitles[] = {@"Brush", @"Lasso", @"Smart Lasso", @"Move"};
+static const NSInteger kMoveSegment = 3;
 
 // Editing redraws the whole image for every touch, so work on a screen-sized copy.
 static UIImage *STKPreviewImage(UIImage *image) {
@@ -50,8 +51,13 @@ static UIImage *STKPreviewImage(UIImage *image) {
 	CAShapeLayer *_lassoLayer;
 	UIActivityIndicatorView *_findingSpinner;
 	UILabel *_toastLabel;
+	UIButton *_invertButton;
+	UIButton *_fullImageButton;
 	UISegmentedControl *_modeControl;
 	UISegmentedControl *_toolControl;
+	UIPanGestureRecognizer *_paintGesture;
+	UITapGestureRecognizer *_dabGesture;
+	UIPanGestureRecognizer *_moveGesture;
 	UISlider *_sizeSlider;
 	UIButton *_undoButton;
 	UIButton *_resetButton;
@@ -92,7 +98,7 @@ static UIImage *STKPreviewImage(UIImage *image) {
 	_scrollView.showsHorizontalScrollIndicator = NO;
 	_scrollView.showsVerticalScrollIndicator = NO;
 	_scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
-	// One finger paints; two fingers pan and zoom.
+	// One finger paints (or pans with Move); two fingers pan and zoom.
 	_scrollView.panGestureRecognizer.minimumNumberOfTouches = 2;
 	_scrollView.frame = canvas.bounds;
 	_scrollView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -156,16 +162,32 @@ static UIImage *STKPreviewImage(UIImage *image) {
 	_toastLabel.translatesAutoresizingMaskIntoConstraints = NO;
 	[canvas addSubview:_toastLabel];
 
-	UIPanGestureRecognizer *paint = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(paint:)];
-	paint.maximumNumberOfTouches = 1;
-	[_contentView addGestureRecognizer:paint];
-	[_contentView addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(dab:)]];
+	UIButtonConfiguration *invert = [UIButtonConfiguration grayButtonConfiguration];
+	invert.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+	invert.imagePadding = 6;
+	_invertButton = [UIButton buttonWithConfiguration:invert primaryAction:[UIAction actionWithTitle:@"Invert" image:[UIImage systemImageNamed:@"circle.lefthalf.filled"] identifier:nil handler:^(UIAction *action) {
+		[self invert];
+	}]];
+	_fullImageButton = [UIButton buttonWithConfiguration:invert primaryAction:[UIAction actionWithTitle:@"Full Image" image:[UIImage systemImageNamed:@"photo"] identifier:nil handler:^(UIAction *action) {
+		[self showFullImage];
+	}]];
+
+	_paintGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(paint:)];
+	_paintGesture.maximumNumberOfTouches = 1;
+	[_contentView addGestureRecognizer:_paintGesture];
+	_dabGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(dab:)];
+	[_contentView addGestureRecognizer:_dabGesture];
+	// Move's one-finger drag. The scroll view's own pan would let the sheet take over whenever there's nowhere to
+	// scroll, dragging the whole editor up and down; a plain pan keeps the drag on the canvas.
+	_moveGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(move:)];
+	_moveGesture.maximumNumberOfTouches = 1;
+	[_scrollView addGestureRecognizer:_moveGesture];
 
 	_modeControl = [[UISegmentedControl alloc] initWithItems:@[@"Erase", @"Restore"]];
 	_modeControl.selectedSegmentIndex = STKBrushModeErase;
 	[_modeControl addTarget:self action:@selector(modeChanged) forControlEvents:UIControlEventValueChanged];
 
-	_toolControl = [[UISegmentedControl alloc] initWithItems:@[kToolTitles[0], kToolTitles[1], kToolTitles[2]]];
+	_toolControl = [[UISegmentedControl alloc] initWithItems:@[kToolTitles[0], kToolTitles[1], kToolTitles[2], kToolTitles[3]]];
 	_toolControl.selectedSegmentIndex = STKStrokeKindBrush;
 	[_toolControl setEnabled:STKStickerFactory.isSubjectLiftingSupported forSegmentAtIndex:STKStrokeKindSmartLasso];
 	[_toolControl addTarget:self action:@selector(toolChanged) forControlEvents:UIControlEventValueChanged];
@@ -195,7 +217,14 @@ static UIImage *STKPreviewImage(UIImage *image) {
 	_hintLabel.numberOfLines = 0;
 	_hintLabel.textAlignment = NSTextAlignmentCenter;
 
-	UIStackView *controls = [[UIStackView alloc] initWithArrangedSubviews:@[_toolControl, _modeControl, _sizeSlider, buttons, _hintLabel]];
+	// Centered under the image rather than stretched across.
+	UIStackView *wholeButtons = [[UIStackView alloc] initWithArrangedSubviews:@[_invertButton, _fullImageButton]];
+	wholeButtons.spacing = 12;
+	UIStackView *invertRow = [[UIStackView alloc] initWithArrangedSubviews:@[wholeButtons]];
+	invertRow.axis = UILayoutConstraintAxisVertical;
+	invertRow.alignment = UIStackViewAlignmentCenter;
+
+	UIStackView *controls = [[UIStackView alloc] initWithArrangedSubviews:@[invertRow, _toolControl, _modeControl, _sizeSlider, buttons, _hintLabel]];
 	controls.axis = UILayoutConstraintAxisVertical;
 	controls.spacing = 14;
 	controls.translatesAutoresizingMaskIntoConstraints = NO;
@@ -239,11 +268,16 @@ static UIImage *STKPreviewImage(UIImage *image) {
 	_resultView.frame = _contentView.bounds;
 	_scrollView.contentSize = _contentView.frame.size;
 	[self centerContent];
+	CGSize content = _scrollView.contentSize;
+	_scrollView.contentOffset = CGPointMake((content.width - bounds.width) / 2, (content.height - bounds.height) / 2);
 }
 
+// Centers the image when it's smaller than the canvas, with room to move it up to half the canvas past any edge so
+// the parts near an edge can be brought into the middle.
 - (void)centerContent {
 	CGSize bounds = _scrollView.bounds.size, content = _scrollView.contentSize;
-	CGFloat x = MAX(0, (bounds.width - content.width) / 2), y = MAX(0, (bounds.height - content.height) / 2);
+	CGFloat x = MAX(0, (bounds.width - content.width) / 2) + bounds.width / 2;
+	CGFloat y = MAX(0, (bounds.height - content.height) / 2) + bounds.height / 2;
 	_scrollView.contentInset = UIEdgeInsetsMake(y, x, y, x);
 }
 
@@ -298,6 +332,17 @@ static UIImage *STKPreviewImage(UIImage *image) {
 	_currentPoints = nil;
 	_brushLayer.hidden = YES;
 	[self updateButtons];
+}
+
+- (void)move:(UIPanGestureRecognizer *)gesture {
+	CGPoint translation = [gesture translationInView:_scrollView];
+	[gesture setTranslation:CGPointZero inView:_scrollView];
+	UIEdgeInsets inset = _scrollView.contentInset;
+	CGSize bounds = _scrollView.bounds.size, content = _scrollView.contentSize;
+	CGFloat minX = -inset.left, maxX = MAX(minX, content.width + inset.right - bounds.width);
+	CGFloat minY = -inset.top, maxY = MAX(minY, content.height + inset.bottom - bounds.height);
+	CGPoint offset = _scrollView.contentOffset;
+	_scrollView.contentOffset = CGPointMake(MAX(minX, MIN(maxX, offset.x - translation.x)), MAX(minY, MIN(maxY, offset.y - translation.y)));
 }
 
 - (STKStrokeKind)tool {
@@ -441,13 +486,20 @@ static UIImage *STKPreviewImage(UIImage *image) {
 }
 
 - (void)toolChanged {
+	BOOL moving = _toolControl.selectedSegmentIndex == kMoveSegment;
+	_paintGesture.enabled = !moving;
+	_dabGesture.enabled = !moving;
+	_moveGesture.enabled = moving;
 	STKStrokeKind tool = [self tool];
 	// Disabled rather than hidden, so the canvas (and its zoom) stays put.
-	_sizeSlider.enabled = tool == STKStrokeKindBrush;
-	NSString *text = tool == STKStrokeKindBrush ? @"Paint with one finger."
+	_sizeSlider.enabled = !moving && tool == STKStrokeKindBrush;
+	NSString *text = moving ? @"Drag to move around; pinch to zoom."
+		: tool == STKStrokeKindBrush ? @"Paint with one finger."
 		: tool == STKStrokeKindLasso ? @"Draw around an area to erase or restore all of it."
 		: @"Draw a loop around something. Restore adds the object inside, Erase removes it.";
-	text = [text stringByAppendingString:@" Pinch to zoom; drag with two fingers to move."];
+	if (!moving) {
+		text = [text stringByAppendingString:@" Pinch to zoom; drag with two fingers to move."];
+	}
 	_hintLabel.text = self.hint.length ? [text stringByAppendingFormat:@" %@", self.hint] : text;
 }
 
@@ -456,6 +508,27 @@ static UIImage *STKPreviewImage(UIImage *image) {
 	[UIView animateWithDuration:0.2 animations:^{
 		self->_ghostView.alpha = self->_modeControl.selectedSegmentIndex == STKBrushModeRestore ? 0.35 : 0;
 	}];
+}
+
+// Swaps what's kept for what's erased, then switches to Restore so the original shows faintly behind what's left.
+- (void)invert {
+	STKBrushStroke *stroke = [STKBrushStroke new];
+	stroke.kind = STKStrokeKindInvert;
+	[_strokes addObject:stroke];
+	[self redrawAll];
+	_modeControl.selectedSegmentIndex = STKBrushModeRestore;
+	[self modeChanged];
+}
+
+// Brings back all of the original, then switches to Erase since that's all that's left to do.
+- (void)showFullImage {
+	STKBrushStroke *stroke = [STKBrushStroke new];
+	stroke.kind = STKStrokeKindWhole;
+	stroke.restores = YES;
+	[_strokes addObject:stroke];
+	[self redrawAll];
+	_modeControl.selectedSegmentIndex = STKBrushModeErase;
+	[self modeChanged];
 }
 
 - (void)undo {

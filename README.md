@@ -22,7 +22,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/showcase-dark.png">
-  <img src="docs/images/showcase-light.png" alt="The Peel iMessage app in Messages, the Stickers section of the emoji keyboard, and the sticker maker">
+  <img src="docs/images/showcase-light.png" alt="The Stickers section of the emoji keyboard in Messages, and the sticker maker">
 </picture>
 
 ## Features
@@ -35,8 +35,7 @@
 - **Peel and stick.** In Messages, touch and hold a sticker to peel it off, then drop it on any bubble, just like Apple's stickers.
 - **Fix the cut-out.** Crop, then use the Erase & Restore brush to clean up the edges, with pinch to zoom and undo.
 - **Die-cut outline.** A white border with a soft shadow that you can switch on or off.
-- **iMessage app included.** Your stickers also show in the Messages app drawer with native peel-and-drag. Tap the pencil tile there to delete stickers.
-- **No home screen app.** Peel lives in Messages and the emoji keyboard; the app that hosts the iMessage app is hidden, like Messages-only App Store apps.
+- **No app to open.** Peel lives entirely in the emoji keyboard.
 
 ## The sticker maker
 
@@ -46,17 +45,15 @@
 | --- | --- | --- |
 | See the finished sticker, switch the outline on or off, and choose still or animated with the frame rate. | Frame the part of the photo or video you want. | Paint away leftover background or bring back parts the cut-out missed. |
 
-<img align="right" src="docs/images/erase-demo.gif" width="260" alt="Erase & Restore in action: zooming in and brushing away two drawer pulls the cut-out kept next to a gray cat, then zooming back out to the clean sticker">
-
 ### Cleaning up a cut-out
 
 Background removal sometimes keeps a bit of the background that touches your subject. Here it kept two dresser drawer pulls next to the cat. In **Erase & Restore**, pinch to zoom in, paint over the extra bits with **Erase**, and they're gone. Turn the brush down for the last pass along the fur. **Restore** paints back anything the cut-out missed, and **Undo** steps back one stroke at a time.
 
 For bigger areas, **Lasso** erases or restores everything inside the outline you draw, and **Smart Lasso** finds the object you draw around so you don't have to trace it.
 
-<br clear="right">
-
-The same maker is shared by the iMessage app and the keyboard, so both ways in work the same.
+<p align="center">
+  <img src="docs/images/erase-demo.gif" width="280" alt="Erase & Restore in action: zooming in and brushing away two drawer pulls the cut-out kept next to a gray cat, then zooming back out to the clean sticker">
+</p>
 
 ## Install
 
@@ -66,7 +63,7 @@ The same maker is shared by the iMessage app and the keyboard, so both ways in w
 
 1. On your device, open **[flameaway.github.io/repo](https://flameaway.github.io/repo/)** and tap **Add to Sileo** or **Add to Zebra** (or add `https://flameaway.github.io/repo/` under Sources). You'll get updates automatically from then on.
 2. Search for **Peel** and install it, then respring.
-3. In Messages, open **Peel** in the app row and tap "+" to make your first sticker, or open any keyboard, switch to emoji, and tap the sticker icon at the bottom left.
+3. Open any keyboard, switch to emoji, tap the sticker icon at the bottom left, then tap "+" to make your first sticker.
 
 You can also download the `.deb` from [Releases](../../releases) and install it with `dpkg -i`.
 
@@ -76,13 +73,11 @@ You can also download the `.deb` from [Releases](../../releases) and install it 
 
 | Part | What it does |
 | --- | --- |
-| `StickersApp` → `/var/jb/Applications/Stickers.app` | A stub that hosts the iMessage app. `LSApplicationLaunchProhibited` and `SBAppTags: hidden` keep it off the home screen. |
 | `Shared/Creator` | The sticker maker used everywhere: crop the photo or video, background removal (the engine behind Photos' "Copy Subject"), an Erase & Restore brush to fix the cut-out, a white die-cut outline, and encoding to PNG or (animated) 30 fps HEICS within Messages' 500 KB limit. |
 | `EmojiStickers` tweak | Adds a sticker button to the emoji keyboard's category bar in every app. Tap a sticker to insert it (in apps whose text field doesn't take pasted images, it's copied for you to paste); touch and hold to peel it off (with Messages' own peel animation), then drop it on a bubble in Messages to stick it there. "+" opens the sticker maker over the current app. |
 | `CreatorLibrary` → `STKCreator.dylib` | The sticker maker for the keyboard. The tweak loads it only when "+" is tapped, so apps don't load Photos and AVFoundation just for showing the keyboard. |
-| `MessagesExtension` (iMessage app) | Your stickers with Messages' native peel-and-drag, "+" to make one without leaving the conversation, and an Edit tile to delete them. |
 
-Stickers are stored in `/var/jb/var/mobile/Library/Stickers`. Sandboxed apps such as Messages can read the jailbreak root on Dopamine, but not our app group container.
+Stickers are stored in `/var/jb/var/mobile/Library/Stickers`. Sandboxed apps such as Messages can read the jailbreak root on Dopamine.
 
 ## Build
 
@@ -90,7 +85,7 @@ Requires [Theos](https://theos.dev) with `sdks/iPhoneOS16.5.sdk`.
 
 ```sh
 make package FINALPACKAGE=1                                         # -> packages/com.flame.stickers_*_iphoneos-arm64.deb
-make do FINALPACKAGE=1 THEOS_DEVICE_IP=<ip> THEOS_DEVICE_USER=root  # build, install, restart Stickers and Messages
+make do FINALPACKAGE=1 THEOS_DEVICE_IP=<ip> THEOS_DEVICE_USER=root  # build, install, restart Messages
 ```
 
 `make install` on its own reinstalls the last built package without rebuilding.
@@ -101,7 +96,7 @@ To publish, bump `Version` in `control`, commit, and run `make release NOTES="- 
 
 ### Stickers on bubbles
 
-When a sticker is dropped in Messages, the tweak calls ChatKit's own code path: `-[CKChatController sendSticker:withDragTarget:]` with an `IMSticker` and a `CKBrowserDragControllerTarget`. This is what Messages' sticker drawer calls when you drop a sticker. Each sticker is attributed to the bundled iMessage app's balloon plugin ID (`com.apple.messages.MSMessageExtensionBalloonPlugin:<team>:com.josh.stickers.messages`) and identified by its `.png`/`.gif` file name. Receiving devices don't show stickers without an app attribution, and Messages can't draw cached sticker files without an image file extension.
+When a sticker is dropped in Messages, the tweak calls ChatKit's own code path: `-[CKChatController sendSticker:withDragTarget:]` with an `IMSticker` and a `CKBrowserDragControllerTarget`. This is what Messages' sticker drawer calls when you drop a sticker. Each sticker is attributed to Apple's own stickers-from-photos app (`com.apple.messages.MSMessageExtensionBalloonPlugin:0000000000:com.apple.Stickers.UserGenerated.MessagesExtension`), so iOS 17 and later offer "Save to Stickers" for it, and it's identified by its file name. Receiving devices don't show stickers without an app attribution, and Messages can't draw cached sticker files without an image file extension.
 
 ### Background removal
 
@@ -118,4 +113,4 @@ Animated stickers are HEICS (HEVC frames with alpha, the format of iOS 17's live
 
 ---
 
-<sub>Screenshots were taken in the iOS 16.4 simulator with the real iMessage app, keyboard tweak and sticker maker running. The stickers were made from real cat photos and GIFs by Peel's own sticker renderer; the simulator can't do background removal, so the cut-outs came from the same Vision subject lifting on a Mac.</sub>
+<sub>Screenshots were taken in the iOS 16.4 simulator with the real keyboard tweak and sticker maker running. The stickers were made from real cat photos and GIFs by Peel's own sticker renderer; the simulator can't do background removal, so the cut-outs came from the same Vision subject lifting on a Mac.</sub>

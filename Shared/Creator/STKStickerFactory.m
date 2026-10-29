@@ -670,6 +670,14 @@ static void STKFindSelection(STKBrushStroke *stroke, UIImage *original, CGRect c
 		CGContextRef cg = context.CGContext;
 		[image drawInRect:rect];
 		for (STKBrushStroke *stroke in strokes) {
+			if (stroke.kind == STKStrokeKindInvert) {
+				// The original with everything drawn so far cut out of it.
+				CGImageRef drawn = CGBitmapContextCreateImage(cg);
+				[original drawInRect:rect blendMode:kCGBlendModeCopy alpha:1];
+				[[UIImage imageWithCGImage:drawn] drawInRect:rect blendMode:kCGBlendModeDestinationOut alpha:1];
+				CGImageRelease(drawn);
+				continue;
+			}
 			CGContextSaveGState(cg);
 			if (stroke.kind == STKStrokeKindBrush) {
 				UIBezierPath *path = STKStrokePath(stroke, crop, size);
@@ -679,7 +687,7 @@ static void STKFindSelection(STKBrushStroke *stroke, UIImage *original, CGRect c
 				CGContextSetLineJoin(cg, kCGLineJoinRound);
 				CGContextReplacePathWithStrokedPath(cg);
 				CGContextClip(cg);
-			} else {
+			} else if (stroke.kind != STKStrokeKindWhole) {
 				CGContextAddPath(cg, STKLassoPath(stroke, crop, rect).CGPath);
 				CGContextClip(cg);
 				if (stroke.kind == STKStrokeKindSmartLasso) {

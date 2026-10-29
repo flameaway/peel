@@ -5,7 +5,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 // Touches up a cut-out with a brush: Erase removes what background removal left behind, Restore paints the original
-// photo back in where it cut away too much. Pinch to zoom; drag with two fingers to move around.
+// photo back in where it cut away too much, and Invert swaps the two. Pinch to zoom; drag with two fingers to move around.
 @interface STKCutoutEditorViewController : UIViewController
 
 // image is the current cut-out and original the same crop before background removal; crop is normalized to the
