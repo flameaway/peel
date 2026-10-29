@@ -10,6 +10,10 @@
 </p>
 
 <p align="center">
+  <a href="https://flameaway.github.io/repo/"><img alt="Add repo to Sileo / Zebra" src="https://img.shields.io/badge/Add%20repo-Sileo%20%C2%B7%20Zebra-C04BE0?style=for-the-badge"></a>
+</p>
+
+<p align="center">
   <b>Peel brings iOS 17's Live Stickers to iOS 16.</b><br>
   Lift the subject out of any photo, Live Photo, GIF or video, give it a die-cut outline, and use it from the emoji keyboard in every app. In Messages you can peel it off and stick it onto a bubble.
 </p>
@@ -23,7 +27,7 @@
 
 ## Features
 
-<img align="right" src="docs/images/animated-sticker.png" width="160" alt="An animated sticker of a black cat with a traffic cone on its head, made from a GIF">
+<img align="right" src="docs/images/animated-sticker.png" width="160" alt="An animated sticker of a white cartoon cat wagging its tongue, made from a GIF">
 
 - **One-tap background removal.** Uses the same engine as Photos' "Copy Subject" (VisionKit), so you get the same clean cut-outs.
 - **Animated stickers.** Live Photos, GIFs and videos become 30 fps animated stickers (HEICS, the format iOS 17 uses), and they still fit Messages' 500 KB limit.
@@ -41,6 +45,16 @@
 | Preview | Crop | Erase & Restore |
 | --- | --- | --- |
 | See the finished sticker, switch the outline on or off, and choose still or animated with the frame rate. | Frame the part of the photo or video you want. | Paint away leftover background or bring back parts the cut-out missed. |
+
+<img align="right" src="docs/images/erase-demo.gif" width="260" alt="Erase & Restore in action: zooming in and brushing away two drawer pulls the cut-out kept next to a gray cat, then zooming back out to the clean sticker">
+
+### Cleaning up a cut-out
+
+Background removal sometimes keeps a bit of the background that touches your subject. Here it kept two dresser drawer pulls next to the cat. In **Erase & Restore**, pinch to zoom in, paint over the extra bits with **Erase**, and they're gone. Turn the brush down for the last pass along the fur. **Restore** paints back anything the cut-out missed, and **Undo** steps back one stroke at a time.
+
+For bigger areas, **Lasso** erases or restores everything inside the outline you draw, and **Smart Lasso** finds the object you draw around so you don't have to trace it.
+
+<br clear="right">
 
 The same maker is shared by the iMessage app and the keyboard, so both ways in work the same.
 
