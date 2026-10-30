@@ -2,6 +2,10 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+// The window of the text field the keyboard is typing into, or nil. With several windows of an app side by side on
+// iPad each has its own key window, so this is the way to tell which one the keyboard belongs to.
+UIWindow *_Nullable STKTypingWindow(void);
+
 // The balloon plugin our stickers are sent as coming from: Apple's stickers made from photos, so iOS 17 and later can
 // save them.
 extern NSString *const STKStickerPluginID;

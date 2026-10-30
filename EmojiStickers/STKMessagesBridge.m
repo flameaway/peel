@@ -49,9 +49,29 @@ static CKChatController *STKFindChatController(UIViewController *controller) {
 	return STKFindChatController(controller.presentedViewController);
 }
 
+@interface UIKeyboardImpl : NSObject
++ (instancetype)activeInstance;
+- (id)delegate;
+@end
+
+UIWindow *STKTypingWindow(void) {
+	Class keyboardClass = NSClassFromString(@"UIKeyboardImpl");
+	id field = [keyboardClass respondsToSelector:@selector(activeInstance)] ? [[keyboardClass activeInstance] delegate] : nil;
+	return [field isKindOfClass:UIView.class] ? ((UIView *)field).window : nil;
+}
+
+static BOOL STKInMessages(void) {
+	return [NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.MobileSMS"];
+}
+
+// The conversation in the window being typed in, or failing that in the first window in front that shows one.
 static CKChatController *STKVisibleChatController(void) {
-	if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.MobileSMS"]) {
+	if (!STKInMessages()) {
 		return nil;
+	}
+	CKChatController *typing = STKFindChatController(STKTypingWindow().rootViewController);
+	if (typing) {
+		return typing;
 	}
 	for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
 		if (![scene isKindOfClass:UIWindowScene.class] || scene.activationState != UISceneActivationStateForegroundActive) {
@@ -65,6 +85,29 @@ static CKChatController *STKVisibleChatController(void) {
 		}
 	}
 	return nil;
+}
+
+// The conversation in the window under the point (in screen coordinates): with two Messages windows side by side on
+// iPad, the one a sticker is being dropped on, which needn't be the one being typed in.
+static CKChatController *STKChatControllerAtScreenPoint(CGPoint point) {
+	if (!STKInMessages()) {
+		return nil;
+	}
+	for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+		if (![scene isKindOfClass:UIWindowScene.class] || scene.activationState != UISceneActivationStateForegroundActive) {
+			continue;
+		}
+		for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+			if (window.hidden || ![window pointInside:[window convertPoint:point fromCoordinateSpace:window.screen.coordinateSpace] withEvent:nil]) {
+				continue;
+			}
+			CKChatController *chat = STKFindChatController(window.rootViewController);
+			if (chat) {
+				return chat;
+			}
+		}
+	}
+	return STKVisibleChatController();
 }
 
 static CKBrowserDragControllerTarget *STKTarget(CKChatController *chat, CGPoint screenPoint, CGSize size, double scale, CGFloat rotation) {
@@ -113,7 +156,7 @@ static double STKScaleForSize(NSURL *url, CGSize size) {
 	if (![self isAvailable]) {
 		return NO;
 	}
-	CKChatController *chat = STKVisibleChatController();
+	CKChatController *chat = STKChatControllerAtScreenPoint(point);
 	CKBrowserDragControllerTarget *target = STKTarget(chat, point, CGSizeMake(100, 100), 1, 0);
 	return target && [chat selectedBalloonForTarget:target] != nil;
 }
@@ -122,7 +165,7 @@ static double STKScaleForSize(NSURL *url, CGSize size) {
 	if (![self isAvailable]) {
 		return NO;
 	}
-	CKChatController *chat = STKVisibleChatController();
+	CKChatController *chat = STKChatControllerAtScreenPoint(point);
 	CKBrowserDragControllerTarget *target = STKTarget(chat, point, size, STKScaleForSize(url, size), rotation);
 	// sendSticker:withDragTarget: indexes the chat items with this result without checking it, so never call it off a bubble.
 	if (!target || ![chat selectedBalloonForTarget:target]) {

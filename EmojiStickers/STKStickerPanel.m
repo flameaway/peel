@@ -595,23 +595,29 @@ static UIImage *STKStickerOutline(UIImage *image, CGSize size) {
 
 @end
 
+// What to present the sticker maker and the hold menu from: the window being typed in, or failing that the first key
+// window in front.
 static UIViewController *STKTopViewController(void) {
+	UIWindow *window = STKTypingWindow();
 	for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+		if (window.rootViewController) {
+			break;
+		}
 		if (![scene isKindOfClass:UIWindowScene.class] || scene.activationState != UISceneActivationStateForegroundActive) {
 			continue;
 		}
-		for (UIWindow *window in ((UIWindowScene *)scene).windows) {
-			if (!window.isKeyWindow) {
-				continue;
+		for (UIWindow *candidate in ((UIWindowScene *)scene).windows) {
+			if (candidate.isKeyWindow) {
+				window = candidate;
+				break;
 			}
-			UIViewController *controller = window.rootViewController;
-			while (controller.presentedViewController && !controller.presentedViewController.isBeingDismissed) {
-				controller = controller.presentedViewController;
-			}
-			return controller;
 		}
 	}
-	return nil;
+	UIViewController *controller = window.rootViewController;
+	while (controller.presentedViewController && !controller.presentedViewController.isBeingDismissed) {
+		controller = controller.presentedViewController;
+	}
+	return controller;
 }
 
 typedef void (*STKPresentCreatorFunction)(UIViewController *, void (^)(BOOL));
