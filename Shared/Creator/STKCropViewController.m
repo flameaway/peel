@@ -107,6 +107,10 @@ typedef NS_OPTIONS(NSUInteger, STKCropEdge) {
 	_imageView = [[UIImageView alloc] initWithImage:_image];
 	_imageView.contentMode = UIViewContentModeScaleAspectFit;
 	_imageView.translatesAutoresizingMaskIntoConstraints = NO;
+	// The photo's pixel size is its intrinsic size; let it shrink rather than squash the Reset button (as it did in
+	// the taller iPad sheet).
+	[_imageView setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisVertical];
+	[_imageView setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
 	[self.view addSubview:_imageView];
 
 	_overlay = [STKCropOverlayView new];

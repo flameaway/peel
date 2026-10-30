@@ -3,8 +3,8 @@
 #import "STKStickerPanel.h"
 #import "STKMessagesBridge.h"
 
-// Adds a Stickers section to the system emoji keyboard (iOS 16, iPhone layout): a sticker button in front of
-// the category bar swaps the emoji grid for the sticker grid; tapping any emoji category swaps it back.
+// Adds a Stickers section to the system emoji keyboard (iOS 16, iPhone and iPad layouts): a sticker button in front
+// of the category bar swaps the emoji grid for the sticker grid; tapping any emoji category swaps it back.
 
 @interface UIKeyboardEmojiCollectionInputView : UIView
 @end
@@ -17,12 +17,26 @@
 @property (nonatomic) CGRect drawFrame;
 - (void)resetRenderedKeyState;
 - (void)prepareForDisplay;
+// The keyboard layout, which plays the haptic when a category is tapped.
+- (id)hitTestResponder;
 @end
 
-@interface UIKeyboardEmojiCategoryBar_iPhone : UIKeyboardEmojiCategoryBar
+@interface UIKeyboardLayoutStar : UIView
+- (void)prepareSliderBehaviorFeedback;
+- (void)provideSliderBehaviorFeedback;
+- (void)finishSliderBehaviorFeedback;
 @end
 
-static const CGFloat kButtonWidth = 36;
+// The button takes a category's slot in front of the bar and gets the same selection circle. The iPad bar's
+// categories are spaced wider apart, with a bigger circle.
+typedef struct {
+	CGFloat width, circle;
+} STKButtonMetrics;
+
+static STKButtonMetrics STKMetricsForBar(UIView *bar) {
+	Class iPadBar = NSClassFromString(@"UIKeyboardEmojiCategoryBar_iPad");
+	return iPadBar && [bar isKindOfClass:iPadBar] ? (STKButtonMetrics){50, 42} : (STKButtonMetrics){36, 30};
+}
 static const void *kPanelKey = &kPanelKey;
 static const void *kButtonKey = &kButtonKey;
 static const void *kAdjustedFrameKey = &kAdjustedFrameKey;
@@ -38,7 +52,8 @@ static UIKeyboardEmojiCollectionInputView *STKInputViewNear(UIView *view) {
 }
 
 static UIKeyboardEmojiCategoryBar *STKCategoryBarNear(UIView *view) {
-	Class barClass = NSClassFromString(@"UIKeyboardEmojiCategoryBar_iPhone");
+	// UIKeyboardEmojiCategoryBar_iPhone above the iPhone keyboard's bottom row, _iPad in the iPad keyboard's bottom row.
+	Class barClass = NSClassFromString(@"UIKeyboardEmojiCategoryBar");
 	for (UIView *sibling in view.superview.subviews) {
 		if ([sibling isKindOfClass:barClass]) {
 			return (UIKeyboardEmojiCategoryBar *)sibling;
@@ -100,14 +115,16 @@ static void STKSetShowingStickers(UIKeyboardEmojiCollectionInputView *inputView,
 		[self setImage:STKStickerGlyph(22) forState:UIControlStateNormal];
 		self.tintColor = UIColor.secondaryLabelColor;
 		self.accessibilityLabel = @"Stickers";
+		[self addTarget:self action:@selector(prepareFeedback) forControlEvents:UIControlEventTouchDown];
 		[self addTarget:self action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
+		[self addTarget:self action:@selector(finishFeedback) forControlEvents:UIControlEventTouchUpOutside | UIControlEventTouchCancel];
 	}
 	return self;
 }
 
 - (void)layoutSubviews {
 	[super layoutSubviews];
-	CGFloat side = MIN(30, MIN(self.bounds.size.width, self.bounds.size.height));
+	CGFloat side = MIN(STKMetricsForBar(self.categoryBar).circle, MIN(self.bounds.size.width, self.bounds.size.height));
 	_selectionCircle.frame = CGRectMake((self.bounds.size.width - side) / 2, (self.bounds.size.height - side) / 2, side, side);
 	_selectionCircle.layer.cornerRadius = side / 2;
 	[self sendSubviewToBack:_selectionCircle];
@@ -119,9 +136,34 @@ static void STKSetShowingStickers(UIKeyboardEmojiCollectionInputView *inputView,
 	self.tintColor = selected ? UIColor.labelColor : UIColor.secondaryLabelColor;
 }
 
+// The same haptic the category bar plays: it prepares on touch down, then ticks and finishes on touch up.
+- (UIKeyboardLayoutStar *)feedbackLayout {
+	UIKeyboardEmojiCategoryBar *bar = (UIKeyboardEmojiCategoryBar *)self.categoryBar;
+	if (![bar respondsToSelector:@selector(hitTestResponder)]) {
+		return nil;
+	}
+	UIKeyboardLayoutStar *layout = bar.hitTestResponder;
+	return [layout respondsToSelector:@selector(prepareSliderBehaviorFeedback)] && [layout respondsToSelector:@selector(provideSliderBehaviorFeedback)] && [layout respondsToSelector:@selector(finishSliderBehaviorFeedback)] ? layout : nil;
+}
+
+- (void)prepareFeedback {
+	[self.feedbackLayout prepareSliderBehaviorFeedback];
+}
+
+- (void)finishFeedback {
+	[self.feedbackLayout finishSliderBehaviorFeedback];
+}
+
 - (void)toggle {
 	UIKeyboardEmojiCollectionInputView *inputView = STKInputViewNear(self.categoryBar);
 	[UIDevice.currentDevice playInputClick];
+	UIKeyboardLayoutStar *layout = self.feedbackLayout;
+	if (layout) {
+		[layout provideSliderBehaviorFeedback];
+		[layout finishSliderBehaviorFeedback];
+	} else {
+		[[UISelectionFeedbackGenerator new] selectionChanged];
+	}
 	STKSetShowingStickers(inputView, !self.selected);
 }
 
@@ -141,7 +183,8 @@ static void STKLayoutButton(UIKeyboardEmojiCategoryBar *bar) {
 		[bar.superview addSubview:button];
 	}
 	CGRect frame = bar.frame;
-	button.frame = CGRectMake(frame.origin.x - kButtonWidth, frame.origin.y, kButtonWidth, frame.size.height);
+	CGFloat width = STKMetricsForBar(bar).width;
+	button.frame = CGRectMake(frame.origin.x - width, frame.origin.y, width, frame.size.height);
 }
 
 @interface UIKBTree : NSObject
@@ -182,7 +225,8 @@ static BOOL STKSyncKeyGeometry(UIKeyboardEmojiCategoryBar *bar) {
 	return changed;
 }
 
-%hook UIKeyboardEmojiCategoryBar_iPhone
+// Hooked on the shared superclass: neither the iPhone nor the iPad subclass overrides these.
+%hook UIKeyboardEmojiCategoryBar
 
 - (void)prepareForDisplay {
 	if (objc_getAssociatedObject(self, kAdjustedFrameKey)) {
@@ -197,9 +241,10 @@ static BOOL STKSyncKeyGeometry(UIKeyboardEmojiCategoryBar *bar) {
 	if (!adjusted && [self respondsToSelector:@selector(key)]) {
 		adjusted = objc_getAssociatedObject(self.key, kAdjustedFrameKey);
 	}
-	if (!(adjusted && CGRectEqualToRect(adjusted.CGRectValue, frame)) && frame.size.width > kButtonWidth * 4) {
-		frame.origin.x += kButtonWidth;
-		frame.size.width -= kButtonWidth;
+	CGFloat width = STKMetricsForBar(self).width;
+	if (!(adjusted && CGRectEqualToRect(adjusted.CGRectValue, frame)) && frame.size.width > width * 4) {
+		frame.origin.x += width;
+		frame.size.width -= width;
 		objc_setAssociatedObject(self, kAdjustedFrameKey, [NSValue valueWithCGRect:frame], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 	}
 	%orig(frame);
@@ -227,10 +272,10 @@ static BOOL STKSyncKeyGeometry(UIKeyboardEmojiCategoryBar *bar) {
 - (void)layoutSubviews {
 	%orig;
 	if (!STKCategoryBarNear(self)) {
-		// iPad or split layouts have no iPhone category bar to host the button.
+		// A layout without a category bar has nowhere to host the button.
 		static dispatch_once_t once;
 		dispatch_once(&once, ^{
-			NSLog(@"[EmojiStickers] no iPhone category bar next to %@; siblings %@", self, [self.superview.subviews valueForKey:@"class"]);
+			NSLog(@"[EmojiStickers] no category bar next to %@; siblings %@", self, [self.superview.subviews valueForKey:@"class"]);
 		});
 		return;
 	}

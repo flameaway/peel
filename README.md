@@ -67,7 +67,7 @@ For bigger areas, **Lasso** erases or restores everything inside the outline you
 
 You can also download the `.deb` from [Releases](../../releases) and install it with `dpkg -i`.
 
-**Requirements:** a rootless jailbreak (tested on Dopamine, iPhone 14 Pro Max, iOS 16.5). Background removal needs an A12 chip or newer.
+**Requirements:** a rootless jailbreak (tested on Dopamine, iPhone 14 Pro Max, iOS 16.5), on iPhone or iPad (the iPad keyboard has been checked in the iOS 16.4 simulator only). Background removal needs an A12 chip or newer.
 
 ## What's in the package
 
@@ -108,7 +108,6 @@ Animated stickers are HEICS (HEVC frames with alpha, the format of iOS 17's live
 
 ## Limitations
 
-- Only the iPhone emoji keyboard layout gets the sticker button. iPad and split layouts don't have the category bar it attaches to.
 - Background removal isn't available on chips older than A12. You can still make stickers from images that are already transparent.
 
 ---
