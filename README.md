@@ -32,6 +32,7 @@
 - **One-tap background removal.** Uses the same engine as Photos' "Copy Subject" (VisionKit), so you get the same clean cut-outs.
 - **Animated stickers.** Live Photos, GIFs and videos become 30 fps animated stickers (HEICS, the format iOS 17 uses), and they still fit Messages' 500 KB limit.
 - **Lives in the emoji keyboard.** A Stickers button sits in the emoji category bar in every app. Tap a sticker to insert it, or "+" to make a new one without leaving the app you're in.
+- **Add Sticker from any photo.** Touch and hold the subject of a photo in Photos, Safari, Messages or any app that lets you lift it, and tap Add Sticker between Copy and Share. Live Photos come out animated. Needs iOS 16.
 - **Peel and stick.** In Messages, touch and hold a sticker to peel it off, then drop it on any bubble, just like Apple's stickers.
 - **Fix the cut-out.** Crop, then use the Erase & Restore brush to clean up the edges, with pinch to zoom and undo.
 - **Die-cut outline.** A white border with a soft shadow that you can switch on or off.
@@ -101,6 +102,10 @@ When a sticker is dropped in Messages, the tweak calls ChatKit's own code path: 
 ### Background removal
 
 Background removal uses the private `VKCRemoveBackgroundRequestHandler` from VisionKitCore and needs an A12 chip or newer. For animations it runs on every frame (up to 90 frames: 3 seconds at 30 fps). Each request waits on a round trip to `mediaanalysisd`, so frames are sent four at a time and only the subject mask is requested (the frame is cut out locally). That takes about 18 ms per frame on an A16 instead of 165 ms.
+
+### Add Sticker on lifted subjects
+
+The menu over a lifted subject belongs to VisionKitCore's `VKCImageSubjectHighlightView`. On iOS 16 its Copy and Share come from the responder chain's context menu, so the tweak adds its command in `buildMenuWithBuilder:` before `UIMenuShare`, and hands the cut-out from `createItemProvider` (what Copy uses) to the sticker maker. For a Live Photo, it asks the image analysis interaction's delegate whether the photo is showing as Live and, in Photos, which `PHAsset` it is, then makes the sticker from the Live Photo's video. VisionKitCore is often loaded after launch, so the hooks wait for it.
 
 ### Animated stickers
 

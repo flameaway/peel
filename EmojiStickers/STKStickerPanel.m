@@ -622,21 +622,25 @@ static UIViewController *STKTopViewController(void) {
 
 typedef void (*STKPresentCreatorFunction)(UIViewController *, void (^)(BOOL));
 
-static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
-	static STKPresentCreatorFunction present;
-	if (!present) {
+void *STKCreatorSymbol(const char *name) {
+	static void *handle;
+	if (!handle) {
 		const char *path = THEOS_PACKAGE_INSTALL_PREFIX "/Library/Application Support/Stickers/STKCreator.dylib";
 #if TARGET_OS_SIMULATOR
 		NSString *override = NSProcessInfo.processInfo.environment[@"STK_CREATOR_PATH"];
 		path = override.length ? override.fileSystemRepresentation : path;
 #endif
-		void *handle = dlopen(path, RTLD_NOW);
-		present = handle ? (STKPresentCreatorFunction)dlsym(handle, "STKPresentStickerCreator") : NULL;
-		if (!present) {
-			NSLog(@"[EmojiStickers] couldn't load the sticker maker: %s", dlerror());
-		}
+		handle = dlopen(path, RTLD_NOW);
 	}
-	return present;
+	void *symbol = handle ? dlsym(handle, name) : NULL;
+	if (!symbol) {
+		NSLog(@"[EmojiStickers] couldn't load the sticker maker (%s): %s", name, dlerror());
+	}
+	return symbol;
+}
+
+static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
+	return (STKPresentCreatorFunction)STKCreatorSymbol("STKPresentStickerCreator");
 }
 
 @interface STKStickerPanel () <UICollectionViewDataSource, UICollectionViewDelegateFlowLayout, UIGestureRecognizerDelegate, UIEditMenuInteractionDelegate>

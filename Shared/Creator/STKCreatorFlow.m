@@ -50,18 +50,22 @@ static const void *kFlowKey = &kFlowKey;
 			}
 			return;
 		}
-		[STKMediaSource loadFromItemProvider:provider completion:^(STKMediaSource *source, NSError *error) {
-			if (!source) {
-				UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Couldn't Load Photo" message:error.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
-				[alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-				[presenter presentViewController:alert animated:YES completion:nil];
-				if (completion) {
-					completion(NO);
-				}
-				return;
+		[STKCreatorFlow presentPreviewForItemProvider:provider fromViewController:presenter completion:completion];
+	}];
+}
+
++ (void)presentPreviewForItemProvider:(NSItemProvider *)provider fromViewController:(UIViewController *)presenter completion:(STKCreatorCompletion)completion {
+	[STKMediaSource loadFromItemProvider:provider completion:^(STKMediaSource *source, NSError *error) {
+		if (!source) {
+			UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Couldn't Load Photo" message:error.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
+			[alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+			[presenter presentViewController:alert animated:YES completion:nil];
+			if (completion) {
+				completion(NO);
 			}
-			[STKCreatorFlow presentPreviewForSource:source fromViewController:presenter completion:completion];
-		}];
+			return;
+		}
+		[STKCreatorFlow presentPreviewForSource:source fromViewController:presenter completion:completion];
 	}];
 }
 
@@ -69,4 +73,22 @@ static const void *kFlowKey = &kFlowKey;
 
 __attribute__((visibility("default"))) void STKPresentStickerCreator(UIViewController *presenter, STKCreatorCompletion completion) {
 	[STKCreatorFlow presentPickerFromViewController:presenter completion:completion];
+}
+
+__attribute__((visibility("default"))) void STKPresentStickerCreatorForLiftedSubject(UIViewController *presenter, NSItemProvider *subject, id livePhoto, STKCreatorCompletion completion) {
+	void (^loaded)(STKMediaSource *, NSError *) = ^(STKMediaSource *source, NSError *error) {
+		if (source.animated) {
+			[STKCreatorFlow presentPreviewForSource:source fromViewController:presenter completion:completion];
+		} else {
+			NSLog(@"[EmojiStickers] Add Sticker: using the still cut-out, the Live Photo didn't load: %@", error);
+			[STKCreatorFlow presentPreviewForItemProvider:subject fromViewController:presenter completion:completion];
+		}
+	};
+	if ([livePhoto isKindOfClass:PHAsset.class]) {
+		[STKMediaSource loadLivePhotoAsset:livePhoto completion:loaded];
+	} else if ([livePhoto isKindOfClass:PHLivePhoto.class]) {
+		[STKMediaSource loadLivePhoto:livePhoto completion:loaded];
+	} else {
+		[STKCreatorFlow presentPreviewForItemProvider:subject fromViewController:presenter completion:completion];
+	}
 }

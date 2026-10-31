@@ -18,4 +18,7 @@ extern const CGFloat STKMaxDragScale;
 // A drawn "peeling sticker" glyph for the emoji category bar, sized like the category icons.
 UIImage *STKStickerGlyph(CGFloat side);
 
+// Looks up a function in STKCreator.dylib (the sticker maker), loading it the first time.
+void *_Nullable STKCreatorSymbol(const char *name);
+
 NS_ASSUME_NONNULL_END

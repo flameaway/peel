@@ -237,32 +237,69 @@ static BOOL STKHasTransparency(CGImageRef image) {
 + (void)loadLivePhotoFromProvider:(NSItemProvider *)provider completion:(void (^)(STKMediaSource *, NSError *))completion {
 	[self loadStillFromProvider:provider completion:^(UIImage *still, NSError *stillError) {
 		[provider loadObjectOfClass:PHLivePhoto.class completionHandler:^(PHLivePhoto *livePhoto, NSError *error) {
-			PHAssetResource *video = nil;
-			for (PHAssetResource *resource in livePhoto ? [PHAssetResource assetResourcesForLivePhoto:livePhoto] : @[]) {
-				if (resource.type == PHAssetResourceTypePairedVideo || resource.type == PHAssetResourceTypeFullSizePairedVideo) {
-					video = resource;
-					break;
-				}
-			}
-			if (!video) {
-				// Fall back to the still part of the Live Photo.
-				completion(still ? [self sourceWithImage:still alreadyCutOut:NO] : nil, error ?: stillError);
+			[self loadLivePhoto:livePhoto still:still error:error ?: stillError completion:completion];
+		}];
+	}];
+}
+
++ (void)loadLivePhotoAsset:(PHAsset *)asset completion:(void (^)(STKMediaSource *_Nullable, NSError *_Nullable))completion {
+	void (^finish)(STKMediaSource *, NSError *) = ^(STKMediaSource *source, NSError *error) {
+		dispatch_async(dispatch_get_main_queue(), ^{
+			completion(source, source ? nil : (error ?: STKLoadError(@"The Live Photo couldn't be read.")));
+		});
+	};
+	PHImageRequestOptions *stillOptions = [PHImageRequestOptions new];
+	stillOptions.deliveryMode = PHImageRequestOptionsDeliveryModeHighQualityFormat;
+	stillOptions.networkAccessAllowed = YES;
+	// Sticker frames are much smaller than this; it's only for the Still option and cropping.
+	CGSize stillSize = CGSizeMake(2048, 2048);
+	[PHImageManager.defaultManager requestImageForAsset:asset targetSize:stillSize contentMode:PHImageContentModeAspectFit options:stillOptions resultHandler:^(UIImage *still, NSDictionary *info) {
+		PHLivePhotoRequestOptions *options = [PHLivePhotoRequestOptions new];
+		options.deliveryMode = PHImageRequestOptionsDeliveryModeHighQualityFormat;
+		options.networkAccessAllowed = YES;
+		[PHImageManager.defaultManager requestLivePhotoForAsset:asset targetSize:PHImageManagerMaximumSize contentMode:PHImageContentModeDefault options:options resultHandler:^(PHLivePhoto *livePhoto, NSDictionary *livePhotoInfo) {
+			// High quality is delivered once, but skip a degraded result just in case.
+			if ([livePhotoInfo[PHImageResultIsDegradedKey] boolValue]) {
 				return;
 			}
-			NSURL *file = [[NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES] URLByAppendingPathComponent:[NSUUID.UUID.UUIDString stringByAppendingPathExtension:@"mov"]];
-			PHAssetResourceRequestOptions *options = [PHAssetResourceRequestOptions new];
-			options.networkAccessAllowed = YES;
-			[PHAssetResourceManager.defaultManager writeDataForAssetResource:video toFile:file options:options completionHandler:^(NSError *writeError) {
-				dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-					STKMediaSource *source = writeError ? nil : [self sourceWithVideoAtURL:file still:still];
-					[NSFileManager.defaultManager removeItemAtURL:file error:nil];
-					if (!source && still) {
-						source = [self sourceWithImage:still alreadyCutOut:NO];
-					}
-					completion(source, writeError);
-				});
-			}];
+			[self loadLivePhoto:livePhoto still:still error:livePhotoInfo[PHImageErrorKey] ?: info[PHImageErrorKey] completion:finish];
 		}];
+	}];
+}
+
++ (void)loadLivePhoto:(PHLivePhoto *)livePhoto completion:(void (^)(STKMediaSource *_Nullable, NSError *_Nullable))completion {
+	[self loadLivePhoto:livePhoto still:nil error:nil completion:^(STKMediaSource *source, NSError *error) {
+		dispatch_async(dispatch_get_main_queue(), ^{
+			completion(source, source ? nil : (error ?: STKLoadError(@"The Live Photo couldn't be read.")));
+		});
+	}];
+}
+
++ (void)loadLivePhoto:(PHLivePhoto *)livePhoto still:(UIImage *)still error:(NSError *)error completion:(void (^)(STKMediaSource *, NSError *))completion {
+	PHAssetResource *video = nil;
+	for (PHAssetResource *resource in livePhoto ? [PHAssetResource assetResourcesForLivePhoto:livePhoto] : @[]) {
+		// The full-size one has the user's edits (trim, key photo), when there are any.
+		if (resource.type == PHAssetResourceTypeFullSizePairedVideo || (resource.type == PHAssetResourceTypePairedVideo && !video)) {
+			video = resource;
+		}
+	}
+	if (!video) {
+		// Fall back to the still part of the Live Photo.
+		completion(still ? [self sourceWithImage:still alreadyCutOut:NO] : nil, error);
+		return;
+	}
+	NSURL *file = [[NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES] URLByAppendingPathComponent:[NSUUID.UUID.UUIDString stringByAppendingPathExtension:@"mov"]];
+	PHAssetResourceRequestOptions *options = [PHAssetResourceRequestOptions new];
+	options.networkAccessAllowed = YES;
+	[PHAssetResourceManager.defaultManager writeDataForAssetResource:video toFile:file options:options completionHandler:^(NSError *writeError) {
+		dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+			STKMediaSource *source = writeError ? nil : [self sourceWithVideoAtURL:file still:still];
+			[NSFileManager.defaultManager removeItemAtURL:file error:nil];
+			if (!source && still) {
+				source = [self sourceWithImage:still alreadyCutOut:NO];
+			}
+			completion(source, writeError);
+		});
 	}];
 }
 
