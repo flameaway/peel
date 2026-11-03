@@ -4,7 +4,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 // The sticker grid shown in place of the emoji grid. Tap a sticker to insert it; touch and hold to peel it
 // off and drag it, with a second finger to resize (up to STKMaxDragScale) and turn it. In Messages, dropping it on
-// a bubble sticks it there; elsewhere a drop inserts it. Held and let go without dragging, it offers Rearrange
+// a bubble sticks it there; elsewhere a drop inserts it. Held while a second finger swipes home (or, on iPad, dragged
+// out of the app's window), it goes along as a system drag and drops into another app. Held and let go without
+// dragging, it offers Rearrange
 // (drag stickers around the grid, then tap the checkmark) and Delete.
 @interface STKStickerPanel : UIView
 

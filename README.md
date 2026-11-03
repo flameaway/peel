@@ -34,6 +34,7 @@
 - **Lives in the emoji keyboard.** A Stickers button sits in the emoji category bar in every app. Tap a sticker to insert it, or "+" to make a new one without leaving the app you're in.
 - **Add Sticker from any photo.** Touch and hold the subject of a photo in Photos, Safari, Messages or any app that lets you lift it, and tap Add Sticker between Copy and Share. Live Photos come out animated. Needs iOS 16.
 - **Peel and stick.** In Messages, touch and hold a sticker to peel it off, then drop it on any bubble, just like Apple's stickers.
+- **Drag into other apps.** Hold a sticker from the keyboard and swipe home with another finger, then open any app and drop it there. On iPad, drag it into the app beside you in Split View or Slide Over.
 - **Fix the cut-out.** Crop, then use the Erase & Restore brush to clean up the edges, with pinch to zoom and undo.
 - **Die-cut outline.** A white border with a soft shadow that you can switch on or off.
 - **No app to open.** Peel lives entirely in the emoji keyboard.
@@ -98,6 +99,10 @@ To publish, bump `Version` in `control`, commit, and run `make release NOTES="- 
 ### Stickers on bubbles
 
 When a sticker is dropped in Messages, the tweak calls ChatKit's own code path: `-[CKChatController sendSticker:withDragTarget:]` with an `IMSticker` and a `CKBrowserDragControllerTarget`. This is what Messages' sticker drawer calls when you drop a sticker. Each sticker is attributed to Apple's own stickers-from-photos app (`com.apple.messages.MSMessageExtensionBalloonPlugin:0000000000:com.apple.Stickers.UserGenerated.MessagesExtension`), so iOS 17 and later offer "Save to Stickers" for it, and it's identified by its file name. Receiving devices don't show stickers without an app attribution, and Messages can't draw cached sticker files without an image file extension.
+
+### Dragging into other apps
+
+The keyboard's sticker drag is the tweak's own gesture, and a touch can't outlive the app it started in, so swiping home used to cancel it. When the sticker is about to leave the app, the tweak hands the finger holding it to a real system drag with UIKit's private `-[UIDragInteraction _immediatelyBeginDragWithTouch:completion:]`. That happens when a second finger touches the bottom edge (the start of a home or app-switch swipe), or on iPad when the sticker is lifted out of the keyboard over the other app. The handoff waits until then because a system drag from the keyboard makes iOS dismiss the keyboard, which would end peeling onto bubbles. The other app gets a PNG, or a GIF for an animated sticker.
 
 ### Background removal
 

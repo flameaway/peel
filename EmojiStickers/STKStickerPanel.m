@@ -363,6 +363,44 @@ static CGRect STKAspectFitRect(CGSize size, CGRect bounds) {
 	return CGRectMake(CGRectGetMidX(bounds) - fitted.width / 2, CGRectGetMidY(bounds) - fitted.height / 2, fitted.width, fitted.height);
 }
 
+// UIKit's way to start a system drag session with a touch that's already down, skipping the interaction's own lift.
+// The completion's argument is whether a session began.
+@interface UIDragInteraction (STKPrivate)
+- (void)_immediatelyBeginDragWithTouch:(UITouch *)touch completion:(void (^)(BOOL began))completion;
+@end
+
+// The sticker as a drag item other apps can take: PNG and GIF files as they are, HEICS as a GIF (see
+// STKPasteableStickerData), loaded only when an app asks for it.
+static UIDragItem *STKStickerDragItem(NSURL *url) {
+	NSString *extension = url.pathExtension.lowercaseString;
+	BOOL gif = [extension isEqualToString:@"gif"] || [extension isEqualToString:@"heics"];
+	NSItemProvider *provider = [NSItemProvider new];
+	provider.suggestedName = @"Sticker";
+	[provider registerDataRepresentationForTypeIdentifier:(gif ? UTTypeGIF : UTTypePNG).identifier visibility:NSItemProviderRepresentationVisibilityAll loadHandler:^NSProgress *(void (^completion)(NSData *, NSError *)) {
+		dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+			NSString *type = nil;
+			NSData *data = STKPasteableStickerData(url, &type);
+			NSLog(@"[EmojiStickers] %@ dragged sticker loaded for another app: %lu bytes of %@", NSBundle.mainBundle.bundleIdentifier, (unsigned long)data.length, type);
+			completion(data, data ? nil : [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileReadCorruptFileError userInfo:nil]);
+		});
+		return nil;
+	}];
+	UIDragItem *item = [[UIDragItem alloc] initWithItemProvider:provider];
+	item.localObject = url;
+	return item;
+}
+
+// A drag preview of the image with no platter or shadow around it, like the sticker itself.
+static UIDragPreview *STKStickerDragPreview(UIImage *image, CGFloat side) {
+	UIImageView *view = [[UIImageView alloc] initWithImage:image];
+	view.contentMode = UIViewContentModeScaleAspectFit;
+	view.frame = (CGRect){CGPointZero, STKAspectFitRect(image.size, CGRectMake(0, 0, side, side)).size};
+	UIDragPreviewParameters *parameters = [UIDragPreviewParameters new];
+	parameters.backgroundColor = UIColor.clearColor;
+	parameters.shadowPath = [UIBezierPath bezierPathWithRect:CGRectZero];
+	return [[UIDragPreview alloc] initWithView:view parameters:parameters];
+}
+
 // From the finger to the middle of the sticker it peeled off, once it has grown by the given factor: the spot it was
 // held by stays under the finger as it lifts, instead of the sticker jumping to the fingertip.
 static CGPoint STKHeldOffset(CGRect start, CGPoint touch, CGFloat grow) {
@@ -643,7 +681,37 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 	return (STKPresentCreatorFunction)STKCreatorSymbol("STKPresentStickerCreator");
 }
 
-@interface STKStickerPanel () <UICollectionViewDataSource, UICollectionViewDelegateFlowLayout, UIGestureRecognizerDelegate, UIEditMenuInteractionDelegate>
+// How far up from the bottom of the screen a touch can start the system's swipe home or to another app, at least:
+// the home indicator's strip, where there is one.
+static const CGFloat kSystemGestureEdge = 20;
+
+// Covers the window while a sticker is held, for a second finger: tells about each touch coming down.
+@interface STKTouchOverlay : UIView
+@property (nonatomic, copy) void (^touchBegan)(UITouch *touch);
+@end
+
+@implementation STKTouchOverlay
+
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+	for (UITouch *touch in touches) {
+		if (self.touchBegan) {
+			self.touchBegan(touch);
+		}
+	}
+	[super touchesBegan:touches withEvent:event];
+}
+
+@end
+
+// Where a held sticker's system drag session is at (see -beginSystemDrag).
+typedef NS_ENUM(NSInteger, STKSystemDragState) {
+	STKSystemDragNone,
+	// Asked UIKit for a session; it calls back for the items.
+	STKSystemDragStarting,
+	STKSystemDragActive,
+};
+
+@interface STKStickerPanel () <UICollectionViewDataSource, UICollectionViewDelegateFlowLayout, UIGestureRecognizerDelegate, UIEditMenuInteractionDelegate, UIDragInteractionDelegate>
 @end
 
 @implementation STKStickerPanel {
@@ -667,7 +735,7 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 	CGPoint _dragStartTouch;
 	BOOL _dragMoved;
 	// A second finger anywhere on screen resizes and turns the held sticker, caught by a view covering the window.
-	UIView *_resizeOverlay;
+	STKTouchOverlay *_resizeOverlay;
 	UIPanGestureRecognizer *_resizeGesture;
 	CGPoint _resizeLastTouch;
 	BOOL _dragResized;
@@ -683,6 +751,16 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 	STKPanelCell *_dragSourceCell;
 	CGPoint _dragTouchOffset;
 	BOOL _dragOverBubble;
+
+	// The finger holding a sticker can't leave the app: swiping home (or, on iPad, crossing into the app alongside)
+	// cancels its touch. So when it's about to, the touch goes to a system drag session, which lives on in other apps:
+	// a second finger can swipe home and open one, and the sticker drops in there. Inside this app the drag stays our
+	// own, since a system drag takes the keyboard (and the tray the sticker came from) away.
+	UIDragInteraction *_systemDrag;
+	UITouch *_peelTouch;
+	STKSystemDragState _systemDragState;
+	UIDragItem *_systemDragItem;
+	CGPoint _systemDragLocation;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -715,6 +793,13 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 		peel.delegate = self;
 		[_collectionView addGestureRecognizer:peel];
 		_peelGesture = peel;
+
+		if ([UIDragInteraction instancesRespondToSelector:@selector(_immediatelyBeginDragWithTouch:completion:)]) {
+			// Only ever started by -beginSystemDrag, so it stays disabled (its own lift gestures off) until then.
+			_systemDrag = [[UIDragInteraction alloc] initWithDelegate:self];
+			_systemDrag.enabled = NO;
+			[_collectionView addInteraction:_systemDrag];
+		}
 
 		UILabel *hint = [UILabel new];
 		hint.text = @"Tap + to make a sticker from a photo, Live Photo or GIF";
@@ -990,9 +1075,21 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 	return gestureRecognizer == _resizeGesture || other == _resizeGesture;
 }
 
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+	// The finger holding a sticker, to hand to a system drag if it's about to leave the app.
+	if (gestureRecognizer == _peelGesture && gestureRecognizer.state == UIGestureRecognizerStatePossible && _systemDragState == STKSystemDragNone) {
+		_peelTouch = touch;
+	}
+	return YES;
+}
+
 - (void)peel:(UILongPressGestureRecognizer *)gesture {
 	if (_rearranging) {
 		[self moveSticker:gesture];
+		return;
+	}
+	if (_systemDragState != STKSystemDragNone) {
+		// The touch is the system drag session's now (which cancels this gesture); it carries on from there.
 		return;
 	}
 	UIWindow *window = self.window;
@@ -1012,6 +1109,7 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 		}
 		case UIGestureRecognizerStateChanged:
 			[self moveDragTo:[gesture locationInView:window]];
+			[self handOffIfOutsideApp:[gesture locationInView:window]];
 			break;
 		case UIGestureRecognizerStateEnded:
 			[self endDragAt:[gesture locationInView:window] cancelled:NO];
@@ -1056,8 +1154,13 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 	if (!window) {
 		return;
 	}
-	_resizeOverlay = [[UIView alloc] initWithFrame:window.bounds];
-	_resizeOverlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+	STKTouchOverlay *overlay = [[STKTouchOverlay alloc] initWithFrame:window.bounds];
+	overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+	__weak typeof(self) weakSelf = self;
+	overlay.touchBegan = ^(UITouch *touch) {
+		[weakSelf secondTouchBegan:touch];
+	};
+	_resizeOverlay = overlay;
 	_resizeGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(resize:)];
 	_resizeGesture.maximumNumberOfTouches = 1;
 	_resizeGesture.delegate = self;
@@ -1069,6 +1172,177 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 	[_resizeOverlay removeFromSuperview];
 	_resizeOverlay = nil;
 	_resizeGesture = nil;
+}
+
+#pragma mark - Carrying a sticker into another app
+
+// A second finger coming down at the bottom edge while a sticker is held is about to swipe home or to another app,
+// which would cancel the touch holding the sticker: hand it to a system drag first.
+- (void)secondTouchBegan:(UITouch *)touch {
+	UIWindow *window = self.window;
+	CGPoint point = [touch locationInView:window];
+	if (window && point.y >= CGRectGetMaxY(window.bounds) - MAX(window.safeAreaInsets.bottom, kSystemGestureEdge)) {
+		NSLog(@"[EmojiStickers] %@ second finger at the bottom edge (%@): handing the sticker to a system drag", NSBundle.mainBundle.bundleIdentifier, NSStringFromCGPoint(point));
+		[self beginSystemDrag];
+	}
+}
+
+// Where the app being typed in is on screen. That's its scene's area, not the typing window's: on iPad the field can
+// be in a UITextEffectsWindow, which is screen-sized even in Split View.
+static CGRect STKTypingAppRect(UIWindow *typing) {
+	id<UICoordinateSpace> space = typing.windowScene ? typing.windowScene.coordinateSpace : typing;
+	return [space convertRect:space.bounds toCoordinateSpace:typing.screen.coordinateSpace];
+}
+
+// On iPad the held sticker can be dragged out of this app's window into the app alongside it. The keyboard spans both
+// apps there, so only once it's up out of the keyboard: a sticker picked up under the other app may be on its way here.
+- (void)handOffIfOutsideApp:(CGPoint)touch {
+	UIWindow *typing = STKTypingWindow();
+	if (!typing || !self.window || touch.y >= [self convertPoint:CGPointZero toView:self.window].y) {
+		return;
+	}
+	CGRect app = STKTypingAppRect(typing);
+	if (!CGRectContainsPoint(app, [self screenPointForWindowPoint:touch])) {
+		NSLog(@"[EmojiStickers] %@ sticker left the app's window %@ at %@: handing it to a system drag", NSBundle.mainBundle.bundleIdentifier, NSStringFromCGRect(app), NSStringFromCGPoint([self screenPointForWindowPoint:touch]));
+		[self beginSystemDrag];
+	}
+}
+
+// The sticker held now: its image, the size it's shown at and where its middle is, in the window.
+- (UIImage *)heldImage {
+	UIImage *image = _dragView.image ?: _dragSourceCell.imageView.image;
+	return image.images.firstObject ?: image;
+}
+
+- (CGFloat)heldSide {
+	if (_peelView && [_peelView respondsToSelector:@selector(rasterizedImageSize)] && [_peelView respondsToSelector:@selector(dragViewScaleUp)]) {
+		CGSize size = [_peelView rasterizedImageSize];
+		return MAX(size.width, size.height) * [_peelView dragViewScaleUp] * _dragScale;
+	}
+	return kDragStickerSide * _dragScale;
+}
+
+- (CGPoint)heldCenter {
+	return _peelView ? [_peelView dragViewCenter] : _dragView.center;
+}
+
+// Hands the finger holding the sticker to a system drag session (see _systemDrag).
+- (void)beginSystemDrag {
+	if (_systemDragState != STKSystemDragNone || !_systemDrag || !_peelTouch || !_dragURL || (!_peelView && !_dragView) || !self.window) {
+		return;
+	}
+	_systemDragState = STKSystemDragStarting;
+	_systemDragLocation = [_peelTouch locationInView:self.window];
+	_systemDrag.enabled = YES;
+	__weak typeof(self) weakSelf = self;
+	[_systemDrag _immediatelyBeginDragWithTouch:_peelTouch completion:^(BOOL began) {
+		[weakSelf systemDragStarted:began];
+	}];
+}
+
+- (void)systemDragStarted:(BOOL)began {
+	NSLog(@"[EmojiStickers] %@ system drag %@", NSBundle.mainBundle.bundleIdentifier, began ? @"began" : @"didn't begin");
+	if (began || _systemDragState != STKSystemDragStarting) {
+		return;
+	}
+	// No session: the touch is still the gesture's, unless it ended meanwhile.
+	_systemDragState = STKSystemDragNone;
+	_systemDrag.enabled = NO;
+	_systemDragItem = nil;
+	UIGestureRecognizerState state = _peelGesture.state;
+	if (state != UIGestureRecognizerStateBegan && state != UIGestureRecognizerStateChanged) {
+		[self endDragAt:_systemDragLocation cancelled:YES];
+	}
+}
+
+// Whether the app's on screen with the system drag over it.
+- (BOOL)systemDragOverApp {
+	UIWindow *typing = STKTypingWindow();
+	if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive || !typing || !self.window) {
+		return NO;
+	}
+	return CGRectContainsPoint(STKTypingAppRect(typing), [self screenPointForWindowPoint:_systemDragLocation]);
+}
+
+// Dropped in another app (or this app took it as an image), or let go of away from here: the sticker settles back
+// into the grid.
+- (void)endDragElsewhere {
+	[self removeResizeOverlay];
+	[_peelView detachElasticEffects];
+	[_peelContainer removeFromSuperview];
+	_peelView = nil;
+	_peelContainer = nil;
+	_peelFrames = nil;
+	_peelThumbnail = nil;
+	[_dragView removeFromSuperview];
+	_dragView = nil;
+	_peelTouch = nil;
+	[_dragSourceCell settleBackFadingIn:YES];
+}
+
+- (NSArray<UIDragItem *> *)dragInteraction:(UIDragInteraction *)interaction itemsForBeginningSession:(id<UIDragSession>)session {
+	if (_systemDragState != STKSystemDragStarting || !_dragURL) {
+		return @[];
+	}
+	_systemDragItem = STKStickerDragItem(_dragURL);
+	UIImage *image = [self heldImage];
+	CGFloat side = [self heldSide];
+	if (image) {
+		_systemDragItem.previewProvider = ^UIDragPreview *{
+			return STKStickerDragPreview(image, side);
+		};
+	}
+	return @[_systemDragItem];
+}
+
+// The sticker as it is under the finger, so the session's preview takes over from the peel without a jump.
+- (UITargetedDragPreview *)dragInteraction:(UIDragInteraction *)interaction previewForLiftingItem:(UIDragItem *)item session:(id<UIDragSession>)session {
+	UIImage *image = [self heldImage];
+	if (!image || !self.window) {
+		return nil;
+	}
+	UIDragPreview *preview = STKStickerDragPreview(image, [self heldSide]);
+	CGPoint center = [self heldCenter];
+	UIDragPreviewTarget *target = [[UIDragPreviewTarget alloc] initWithContainer:self.window center:center transform:CGAffineTransformMakeRotation(_dragRotation)];
+	return [[UITargetedDragPreview alloc] initWithView:preview.view parameters:preview.parameters target:target];
+}
+
+- (void)dragInteraction:(UIDragInteraction *)interaction sessionWillBegin:(id<UIDragSession>)session {
+	_systemDragState = STKSystemDragActive;
+	_peelContainer.hidden = YES;
+	_dragView.hidden = YES;
+	NSLog(@"[EmojiStickers] %@ sticker handed to a system drag", NSBundle.mainBundle.bundleIdentifier);
+}
+
+- (BOOL)dragInteraction:(UIDragInteraction *)interaction sessionAllowsMoveOperation:(id<UIDragSession>)session {
+	return NO;
+}
+
+- (BOOL)dragInteraction:(UIDragInteraction *)interaction sessionIsRestrictedToDraggingApplication:(id<UIDragSession>)session {
+	return NO;
+}
+
+- (void)dragInteraction:(UIDragInteraction *)interaction sessionDidMove:(id<UIDragSession>)session {
+	if (self.window) {
+		_systemDragLocation = [session locationInView:self.window];
+	}
+}
+
+- (void)dragInteraction:(UIDragInteraction *)interaction session:(id<UIDragSession>)session didEndWithOperation:(UIDropOperation)operation {
+	BOOL overApp = [self systemDragOverApp];
+	NSLog(@"[EmojiStickers] %@ system drag ended: %@", NSBundle.mainBundle.bundleIdentifier, operation != UIDropOperationCancel ? @"dropped" : overApp ? @"let go of over this app" : @"let go of elsewhere");
+	_systemDragState = STKSystemDragNone;
+	_systemDrag.enabled = NO;
+	_systemDragItem = nil;
+	if (operation == UIDropOperationCancel && overApp && (_peelView || _dragView)) {
+		// Back over this app and let go where nothing took it: as if the gesture had ended there.
+		_peelContainer.hidden = NO;
+		_dragView.hidden = NO;
+		[self moveDragTo:_systemDragLocation];
+		[self endDragAt:_systemDragLocation cancelled:NO];
+		return;
+	}
+	[self endDragElsewhere];
 }
 
 // Like Messages: moving the second finger away from the sticker or toward it grows or shrinks it, and circling it
@@ -1319,6 +1593,7 @@ static STKPresentCreatorFunction STKCreatorEntryPoint(void) {
 
 - (void)endDragAt:(CGPoint)touch cancelled:(BOOL)cancelled {
 	[self removeResizeOverlay];
+	_peelTouch = nil;
 	// Held still and let go: settle it back and offer its menu.
 	BOOL showMenu = !cancelled && !_dragMoved && !_dragResized;
 	NSURL *url = _dragURL;
