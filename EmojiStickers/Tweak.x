@@ -332,9 +332,35 @@ static BOOL STKSyncKeyGeometry(UIKeyboardEmojiCategoryBar *bar) {
 
 %end
 
+@interface CKMediaObjectManager : NSObject
+- (id)transferWithStickerFileURL:(NSURL *)url transferUserInfo:(NSDictionary *)userInfo attributionInfo:(NSDictionary *)attributionInfo;
+@end
+
+%group StickerAttribution
+
+%hook CKMediaObjectManager
+
+// Every sticker Messages sends is made here, ours included (tapped ones through -[CKBrowserItemPayload
+// browserItemFromSticker:], placed ones through -[CKChatController sendSticker:withDragTarget:]). Give ours the
+// attribution iOS 17's own Live Stickers have; see STKStickerAttributionInfo.
+- (id)transferWithStickerFileURL:(NSURL *)url transferUserInfo:(NSDictionary *)userInfo attributionInfo:(NSDictionary *)attributionInfo {
+	if ([userInfo isKindOfClass:NSDictionary.class] && [userInfo[@"pid"] isEqual:STKStickerPluginID]) {
+		attributionInfo = STKStickerAttributionInfo(attributionInfo);
+	}
+	return %orig(url, userInfo, attributionInfo);
+}
+
+%end
+
+%end
+
 %ctor {
 	%init;
 	if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.MobileSMS"] && objc_getClass("CKBrowserDragStickerView")) {
 		%init(Messages);
+	}
+	Class mediaObjectManager = objc_getClass("CKMediaObjectManager");
+	if (mediaObjectManager && [mediaObjectManager instancesRespondToSelector:@selector(transferWithStickerFileURL:transferUserInfo:attributionInfo:)]) {
+		%init(StickerAttribution);
 	}
 }

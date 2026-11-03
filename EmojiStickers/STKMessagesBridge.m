@@ -23,7 +23,6 @@
 
 @interface IMSticker : NSObject
 - (instancetype)initWithStickerID:(NSString *)stickerID stickerPackID:(NSString *)stickerPackID fileURL:(NSURL *)fileURL accessibilityLabel:(NSString *)accessibilityLabel moodCategory:(id)moodCategory stickerName:(NSString *)stickerName;
-- (void)setBallonBundleID:(NSString *)bundleID;
 @end
 
 // Receiving devices only show stickers attributed to an iMessage app, identified by its balloon plugin ID
@@ -31,6 +30,17 @@
 // photos (iOS 17's Live Stickers): iOS 17 and later only offer "Save to Stickers" for stickers from that app
 // (+[CKUtilities isIMStickerSaveable:] checks for IMBalloonBundleIdentifierCling), and show them like their own.
 NSString *const STKStickerPluginID = @"com.apple.messages.MSMessageExtensionBalloonPlugin:0000000000:com.apple.Stickers.UserGenerated.MessagesExtension";
+
+// What an iPhone on iOS 17 or later attaches to a Live Sticker it sends (checked against received ones). iOS 16 has no
+// Stickers app, so ChatKit's own lookup (-[CKMediaObjectManager mediaObjectWithSticker:stickerUserInfo:] asks
+// IMBalloonPluginManager for the sticker pack's plugin) falls back to the generic iMessage app plugin and the sticker
+// goes out as coming from "com.apple.messages.MSMessageExtensionBalloonPlugin", "Messages Extension Plugin".
+NSDictionary *STKStickerAttributionInfo(NSDictionary *attributionInfo) {
+	NSMutableDictionary *info = [attributionInfo mutableCopy] ?: [NSMutableDictionary dictionary];
+	info[@"bundle-id"] = STKStickerPluginID;
+	info[@"name"] = @"Stickers";
+	return info;
+}
 
 static CKChatController *STKFindChatController(UIViewController *controller) {
 	Class chatClass = NSClassFromString(@"CKChatController");
@@ -142,14 +152,11 @@ static double STKScaleForSize(NSURL *url, CGSize size) {
 	return chat && [chat respondsToSelector:@selector(sendSticker:withDragTarget:)] && [chat respondsToSelector:@selector(selectedBalloonForTarget:)] && NSClassFromString(@"IMSticker");
 }
 
-// An IMSticker for the file, attributed to Apple's stickers app (see STKStickerPluginID).
+// An IMSticker for the file, attributed to Apple's stickers app (see STKStickerPluginID). Its ballonBundleID stays unset,
+// as for stickers from Messages' own drawer: ChatKit would send it as an extra "sbid" key that real Live Stickers don't
+// have.
 + (IMSticker *)stickerForURL:(NSURL *)url {
-	NSString *pluginID = STKStickerPluginID;
-	IMSticker *sticker = [[NSClassFromString(@"IMSticker") alloc] initWithStickerID:url.lastPathComponent stickerPackID:pluginID fileURL:url accessibilityLabel:@"Sticker" moodCategory:nil stickerName:nil];
-	if ([sticker respondsToSelector:@selector(setBallonBundleID:)]) {
-		[sticker setBallonBundleID:pluginID];
-	}
-	return sticker;
+	return [[NSClassFromString(@"IMSticker") alloc] initWithStickerID:url.lastPathComponent stickerPackID:STKStickerPluginID fileURL:url accessibilityLabel:@"Sticker" moodCategory:nil stickerName:nil];
 }
 
 + (BOOL)canPlaceStickerAtScreenPoint:(CGPoint)point {

@@ -10,6 +10,10 @@ UIWindow *_Nullable STKTypingWindow(void);
 // save them.
 extern NSString *const STKStickerPluginID;
 
+// The attribution info to send with one of our stickers: the given one with the app it says the sticker came from
+// replaced by Apple's Stickers app, as iOS 17 and later send it.
+NSDictionary *STKStickerAttributionInfo(NSDictionary *_Nullable attributionInfo);
+
 // Places stickers on message bubbles and in the message being written through Messages' own (private, iOS 16) ChatKit
 // code paths: -[CKChatController sendSticker:withDragTarget:], the call its sticker drawer makes on drop, and
 // -[CKChatInputController startEditingPayload:] with a sticker payload, what the drawer does on tap.
