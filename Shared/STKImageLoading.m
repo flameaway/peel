@@ -119,9 +119,29 @@ NSUInteger STKImageCost(UIImage *image) {
 	return frames * CGImageGetBytesPerRow(first) * CGImageGetHeight(first);
 }
 
+// Whether the sticker is an animated PNG. Only reads the file's header.
+static BOOL STKIsAnimatedPNG(NSURL *url) {
+	if (![url.pathExtension.lowercaseString isEqualToString:@"png"]) {
+		return NO;
+	}
+	CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
+	if (!source) {
+		return NO;
+	}
+	BOOL animated = CGImageSourceGetCount(source) > 1;
+	CFRelease(source);
+	return animated;
+}
+
+UTType *STKPasteableStickerType(NSURL *url) {
+	NSString *extension = url.pathExtension.lowercaseString;
+	BOOL animated = [extension isEqualToString:@"gif"] || [extension isEqualToString:@"heics"] || STKIsAnimatedPNG(url);
+	return animated ? UTTypeGIF : UTTypePNG;
+}
+
 NSData *STKPasteableStickerData(NSURL *url, NSString **typeIdentifier) {
 	NSString *extension = url.pathExtension.lowercaseString;
-	if (![extension isEqualToString:@"heics"]) {
+	if (![extension isEqualToString:@"heics"] && !STKIsAnimatedPNG(url)) {
 		*typeIdentifier = [extension isEqualToString:@"gif"] ? UTTypeGIF.identifier : UTTypePNG.identifier;
 		return [NSData dataWithContentsOfURL:url];
 	}

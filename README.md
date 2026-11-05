@@ -114,7 +114,7 @@ The menu over a lifted subject belongs to VisionKitCore's `VKCImageSubjectHighli
 
 ### Animated stickers
 
-Animated stickers are HEICS (HEVC frames with alpha, the format of iOS 17's live stickers), which fits 30 fps in 500 KB. Where HEICS can't be written they fall back to animated PNG, then GIF, at a lower frame rate. Tapping a HEICS sticker in another app pastes a GIF, since few apps play animated HEIC.
+Animated stickers are HEICS (HEVC frames with alpha, the format of iOS 17's live stickers), which fits 30 fps in 500 KB. Where HEICS can't be written, or even its smallest size doesn't fit, they fall back to animated PNG, then GIF, at a lower frame rate. Messages gets the sticker file as it is. Other apps (tapping a sticker, or dragging it in) get animated HEICS and PNG stickers as a GIF: few apps play animated HEIC, and apps take an animated PNG for a still image (Canva's upload of one never finishes, leaving a broken image).
 
 ## Limitations
 

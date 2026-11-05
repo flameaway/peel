@@ -369,14 +369,12 @@ static CGRect STKAspectFitRect(CGSize size, CGRect bounds) {
 - (void)_immediatelyBeginDragWithTouch:(UITouch *)touch completion:(void (^)(BOOL began))completion;
 @end
 
-// The sticker as a drag item other apps can take: PNG and GIF files as they are, HEICS as a GIF (see
-// STKPasteableStickerData), loaded only when an app asks for it.
+// The sticker as a drag item other apps can take: still PNGs and GIF files as they are, HEICS and animated PNGs as a
+// GIF (see STKPasteableStickerData), loaded only when an app asks for it.
 static UIDragItem *STKStickerDragItem(NSURL *url) {
-	NSString *extension = url.pathExtension.lowercaseString;
-	BOOL gif = [extension isEqualToString:@"gif"] || [extension isEqualToString:@"heics"];
 	NSItemProvider *provider = [NSItemProvider new];
 	provider.suggestedName = @"Sticker";
-	[provider registerDataRepresentationForTypeIdentifier:(gif ? UTTypeGIF : UTTypePNG).identifier visibility:NSItemProviderRepresentationVisibilityAll loadHandler:^NSProgress *(void (^completion)(NSData *, NSError *)) {
+	[provider registerDataRepresentationForTypeIdentifier:STKPasteableStickerType(url).identifier visibility:NSItemProviderRepresentationVisibilityAll loadHandler:^NSProgress *(void (^completion)(NSData *, NSError *)) {
 		dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
 			NSString *type = nil;
 			NSData *data = STKPasteableStickerData(url, &type);

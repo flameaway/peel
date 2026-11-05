@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -12,9 +13,14 @@ UIImage *_Nullable STKLoadStickerImage(NSURL *url, CGFloat maxSide);
 // Roughly how many bytes a loaded sticker image takes in memory, for NSCache costs.
 NSUInteger STKImageCost(UIImage *image);
 
-// The sticker as something other apps can paste: PNG and GIF files as they are; HEICS (which few apps can play)
-// converted to a GIF. Sets typeIdentifier to the data's type.
+// The sticker as something other apps can paste: still PNGs and GIF files as they are; HEICS and animated PNGs
+// converted to a GIF. Few apps play HEICS, and apps take an animated PNG for a still image (Canva's upload of one
+// never finishes and leaves a broken image). Sets typeIdentifier to the data's type.
 NSData *_Nullable STKPasteableStickerData(NSURL *url, NSString *_Nullable *_Nonnull typeIdentifier);
+
+// The type STKPasteableStickerData gives for the sticker, without converting it: GIF for animated stickers, PNG for
+// stills.
+UTType *STKPasteableStickerType(NSURL *url);
 
 // The sticker as pasteboard items for Telegram, which sends pasted HEICS as an animated sticker and a single PNG as a
 // sticker, but anything with a GIF on the pasteboard as a GIF. Animated stickers become HEICS; stills are PNG, also
