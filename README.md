@@ -92,7 +92,7 @@ make do FINALPACKAGE=1 THEOS_DEVICE_IP=<ip> THEOS_DEVICE_USER=root  # build, ins
 
 `make install` on its own reinstalls the last built package without rebuilding.
 
-To publish, bump `Version` in `control`, commit, and run `make release NOTES="- What changed"`. That builds the final package and creates a GitHub release with it. [Flame's repo](https://github.com/flameaway/repo) picks up new releases within the hour, along with the store listing in `listing/`: `info.json` (description, screenshots and header, as paths in this repo) and `icon.png`.
+To publish, bump `Version` in `control`, commit, and run `make release NOTES="- What changed"`. That builds the final package and creates a GitHub release with it. It then starts [Flame's repo](https://github.com/flameaway/repo)'s build, which publishes the release within a minute or two, along with the store listing in `listing/`: `info.json` (description, screenshots and header, as paths in this repo) and `icon.png`.
 
 ## How it works
 

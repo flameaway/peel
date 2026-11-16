@@ -14,7 +14,8 @@ SUBPROJECTS += EmojiStickers CreatorLibrary
 
 include $(THEOS_MAKE_PATH)/aggregate.mk
 
-# Builds the final package and publishes it as a GitHub release; Flame's repo picks it up from there.
+# Builds the final package, publishes it as a GitHub release and starts Flame's repo's build so the update goes out
+# right away (the repo has no schedule, so nothing else would pick the release up).
 # Release notes come from NOTES="..." or, if unset, are written in your editor.
 VERSION := $(shell sed -n 's/^Version: //p' control)
 PACKAGE_ID := $(shell sed -n 's/^Package: //p' control)
@@ -30,5 +31,6 @@ release:
 	@test -f $(RELEASE_DEB) || { echo "$(RELEASE_DEB) wasn't built."; exit 1; }
 	git push origin HEAD
 	gh release create v$(VERSION) $(RELEASE_DEB) --title "Peel $(VERSION)" $(if $(NOTES),--notes "$$NOTES",)
+	gh workflow run pages.yml -R flameaway/repo || { echo "Released, but starting Flame's repo's build failed: run it from https://github.com/flameaway/repo/actions"; exit 1; }
 
 .PHONY: release
